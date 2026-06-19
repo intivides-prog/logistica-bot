@@ -110,9 +110,98 @@ async def cmd_testdrive(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
  
  
+async def handle_update_request(update: Update, upd: dict):
+    """Maneja pedidos de modificación de excursiones existentes."""
+    action      = upd['action']
+    target_date = upd['date']
+    identifier  = upd.get('identifier')
+    id_type     = upd.get('identifier_type')
+    new_value   = upd.get('new_value')
+ 
+    # Buscar excursiones
+    matches = db.find_excursions(target_date, identifier, id_type)
+ 
+    if not matches:
+        hint = f" con guía {identifier}" if identifier else ""
+        await update.message.reply_text(
+            f"No encontré excursiones para el {target_date.strftime('%d/%m/%Y')}{hint}. "
+            f"Verificá la fecha y el nombre."
+        )
+        return
+ 
+    if len(matches) > 1 and not identifier:
+        lines = [f"• {ex['activity']} — Guía: {ex['guide'] or '?'}" for ex in matches]
+        await update.message.reply_text(
+            f"Hay {len(matches)} salidas ese día. Especificá el guía o el apellido del cliente:\n" +
+            '\n'.join(lines)
+        )
+        return
+ 
+    exc = matches[0]
+    exc_id = exc['id']
+    fecha_str = target_date.strftime('%d/%m/%Y')
+ 
+    if action == 'cancel':
+        db.cancel_excursion(exc_id)
+        await update.message.reply_text(
+            f"✅ Salida cancelada: {exc['activity']} — {fecha_str} "
+            f"(Guía: {exc['guide'] or '—'})"
+        )
+ 
+    elif action == 'update_hora':
+        if not new_value:
+            await update.message.reply_text("No entendí la nueva hora. Ejemplo: _\"a las 10hs\"_", parse_mode='Markdown')
+            return
+        db.update_excursion(exc_id, 'hora', new_value)
+        await update.message.reply_text(
+            f"✅ Hora actualizada a *{new_value}*\n"
+            f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
+            parse_mode='Markdown'
+        )
+ 
+    elif action == 'update_guide':
+        if not new_value:
+            await update.message.reply_text("No entendí el nuevo guía. Ejemplo: _\"cambia el guía de la salida del 25/6 guía Julián a Rodri\"_", parse_mode='Markdown')
+            return
+        db.update_excursion(exc_id, 'guide', new_value)
+        await update.message.reply_text(
+            f"✅ Guía actualizado a *{new_value}*\n"
+            f"{exc['activity']} — {fecha_str}",
+            parse_mode='Markdown'
+        )
+ 
+    elif action == 'update_date':
+        if not new_value:
+            await update.message.reply_text("No entendí la nueva fecha. Ejemplo: _\"cambia el día de la salida del 25/6 guía Julián al 27/6\"_", parse_mode='Markdown')
+            return
+        db.update_excursion(exc_id, 'date', new_value)
+        await update.message.reply_text(
+            f"✅ Fecha actualizada al *{new_value.strftime('%d/%m/%Y')}*\n"
+            f"{exc['activity']} — Guía: {exc['guide'] or '—'}",
+            parse_mode='Markdown'
+        )
+ 
+    elif action == 'update_restrictions':
+        if not new_value:
+            await update.message.reply_text("No entendí las restricciones. Ejemplo: _\"agrega 1 celíaco\"_", parse_mode='Markdown')
+            return
+        combined = db.append_restrictions(exc_id, new_value)
+        await update.message.reply_text(
+            f"✅ Restricciones actualizadas: *{combined}*\n"
+            f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
+            parse_mode='Markdown'
+        )
+ 
+ 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ''
     t = text.lower()
+ 
+    # Detectar si es una actualización
+    upd = msg_parser.parse_update(text)
+    if upd:
+        await handle_update_request(update, upd)
+        return
  
     # Solo responder si parece un pedido de planilla
     keywords = ['plani', 'planilla', 'kayak', 'mtb', 'trekking', 'naveg']

@@ -2,6 +2,7 @@
 Bot principal de Telegram para generación de planillas de excursiones.
 """
 import os
+import re
 import logging
 import tempfile
 from datetime import date

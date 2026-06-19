@@ -96,7 +96,7 @@ def add_excursion(params: dict) -> str | None:
     site     = params.get('site', '')
     pax      = params.get('pax', '')
     guide    = params.get('guide', '')
-    hora     = params.get('hora', '09:00')
+    hora     = params.get('hora') or '09:00'
     gtype    = params.get('gastronomy_type', 'AC')
  
     # Parsear hora

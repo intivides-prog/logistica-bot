@@ -62,6 +62,24 @@ def _get_service():
     return build('calendar', 'v3', credentials=creds)
  
  
+def test_connection() -> str:
+    """Prueba la conexión con Google Calendar. Devuelve mensaje de éxito o error."""
+    creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+    if not creds_json:
+        return "❌ Variable GOOGLE_CREDENTIALS_JSON no encontrada en Railway."
+    try:
+        creds_info = json.loads(creds_json)
+    except Exception as e:
+        return f"❌ Error al parsear JSON de credenciales: {e}"
+    try:
+        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        service = build('calendar', 'v3', credentials=creds)
+        service.calendarList().list().execute()
+        return f"✅ Conexión exitosa con Google Calendar. Calendar ID: {CALENDAR_ID}"
+    except Exception as e:
+        return f"❌ Error de conexión: {e}"
+ 
+ 
 def add_excursion(params: dict) -> str | None:
     """
     Agrega la excursión al Google Calendar.
@@ -116,4 +134,3 @@ def add_excursion(params: dict) -> str | None:
     except Exception as e:
         print(f"[Calendar] Error: {e}")
         return None
- 

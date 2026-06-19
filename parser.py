@@ -109,22 +109,16 @@ def parse_message(text: str) -> dict:
                     pass
 
     # ── Guía ─────────────────────────────────────────────────────────────────
+    # La segunda palabra NO puede ser una palabra clave (hotel, pax, hay, etc.)
     result['guide'] = None
-    _GUIDE_STOP = {'hotel', 'pax', 'el', 'la', 'los', 'las', 'para', 'con', 'en', 'de', 'del'}
     guide_m = re.search(
-        r'gu[ií]a(?:\s+(?:es|va\s+a\s+ser|ser[aá]|:))?\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
+        r'gu[ií]a(?:\s+(?:es|va\s+a\s+ser|ser[aá]|:))?\s+'
+        r'([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+'
+        r'(?:\s+(?!(?:hotel|pax|hay|con|para|el|la|los|las|de|del|en|al)\b)[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
         text, re.IGNORECASE
     )
     if guide_m:
-        words = guide_m.group(1).split()
-        # Cortar si aparece una palabra reservada (hotel, pax, etc.)
-        clean = []
-        for w in words:
-            if w.lower() in _GUIDE_STOP:
-                break
-            clean.append(w)
-        if clean:
-            result['guide'] = ' '.join(clean).title()
+        result['guide'] = guide_m.group(1).strip().title()
 
     # ── Hora ─────────────────────────────────────────────────────────────────
     result['hora'] = None

@@ -99,6 +99,17 @@ async def cmd_testcal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(result)
  
  
+async def cmd_testdrive(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    import drive_service as ds
+    folder_id = os.environ.get('GOOGLE_DRIVE_FOLDER_ID', '(no configurado)')
+    creds_ok = bool(os.environ.get('GOOGLE_CREDENTIALS_JSON'))
+    await update.message.reply_text(
+        f"GOOGLE_DRIVE_FOLDER_ID: {folder_id}\n"
+        f"GOOGLE_CREDENTIALS_JSON: {'✅ presente' if creds_ok else '❌ ausente'}\n"
+        f"GOOGLE_AVAILABLE: {ds.GOOGLE_AVAILABLE}"
+    )
+ 
+ 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ''
     t = text.lower()
@@ -187,7 +198,8 @@ def main():
     app.add_handler(CommandHandler("proximas", cmd_proximas))
     app.add_handler(CommandHandler("gastro",   cmd_gastro))
     app.add_handler(CommandHandler("guias",    cmd_guias))
-    app.add_handler(CommandHandler("testcal",  cmd_testcal))
+    app.add_handler(CommandHandler("testcal",   cmd_testcal))
+    app.add_handler(CommandHandler("testdrive", cmd_testdrive))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
  
     # Iniciar scheduler después de que el event loop esté corriendo

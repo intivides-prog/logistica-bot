@@ -8,7 +8,7 @@ Ejemplos que entiende:
 """
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 SITES = {
     'mascardi':     'Lago Mascardi',
@@ -26,19 +26,139 @@ MONTHS_ES = {
     'julio':7,'agosto':8,'septiembre':9,'octubre':10,'noviembre':11,'diciembre':12
 }
 
+DAYS_ES = {
+    'lunes': 0, 'martes': 1, 'miércoles': 2, 'miercoles': 2,
+    'jueves': 3, 'viernes': 4, 'sábado': 5, 'sabado': 5, 'domingo': 6,
+}
+
+# ── Consultas de fecha en lenguaje natural ────────────────────────────────────
+
+def parse_date_query(text: str) -> date | None:
+    """
+    Detecta si el mensaje es una consulta de qué hay en una fecha.
+    Ej: "qué hay el viernes", "que tenemos el 12/2", "qué salidas hay el viernes 2/3"
+    Devuelve la fecha consultada, o None si no es una consulta.
+    """
+    t = text.lower().strip()
+
+    if not re.search(
+        r'qu[eé]\s+(?:hay|tenemos|salidas?|excursion|pasa|queda|sale)|'
+        r'(?:hay|tenemos)\s+(?:algo|salidas?)|mostrame\s+(?:el|la|los)',
+        t
+    ):
+        return None
+
+    today = date.today()
+
+    # "pasado mañana" — antes de "mañana"
+    if re.search(r'pasado\s+ma[ñn]ana', t):
+        return today + timedelta(days=2)
+
+    # "mañana"
+    if 'mañana' in t or 'manana' in t:
+        return today + timedelta(days=1)
+
+    # "hoy"
+    if 'hoy' in t:
+        return today
+
+    # "esta semana" / "la semana que viene" → primer día
+    if re.search(r'esta\s+semana', t):
+        return today
+    if re.search(r'semana\s+que\s+viene|pr[oó]xima\s+semana', t):
+        monday = today + timedelta(days=(7 - today.weekday()))
+        return monday
+
+    # D/M — tiene prioridad sobre día de semana si viene con fecha exacta
+    dm = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', text)
+    if dm:
+        day, month = int(dm.group(1)), int(dm.group(2))
+        year = int(dm.group(3)) if dm.group(3) else (
+            today.year if month >= today.month else today.year + 1
+        )
+        try:
+            return date(year, month, day)
+        except ValueError:
+            pass
+
+    # "D de mes"
+    de_mes = re.search(r'\b(\d{1,2})\s+de\s+([a-záéíóú]+)', t)
+    if de_mes:
+        day = int(de_mes.group(1))
+        month = MONTHS_ES.get(de_mes.group(2))
+        if month:
+            year = today.year if month >= today.month else today.year + 1
+            try:
+                return date(year, month, day)
+            except ValueError:
+                pass
+
+    # Día de semana: "el viernes", "el próximo martes"
+    for day_name, day_num in DAYS_ES.items():
+        if day_name in t:
+            days_ahead = day_num - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            return today + timedelta(days=days_ahead)
+
+    return None
+
+# ── Números en palabras ───────────────────────────────────────────────────────
+NUM_WORDS = {
+    'un': '1', 'uno': '1', 'una': '1',
+    'dos': '2', 'tres': '3', 'cuatro': '4', 'cinco': '5',
+    'seis': '6', 'siete': '7', 'ocho': '8', 'nueve': '9', 'diez': '10',
+}
+# patrón que acepta dígito O palabra numérica
+_NUM = r'(\d+|un[ao]?|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)'
+
+def _n(m, g=1):
+    """Convierte grupo g del match a número string (dígito o palabra)."""
+    val = (m.group(g) or '1').lower().strip()
+    return NUM_WORDS.get(val, val if val.isdigit() else '1')
+
+# Palabras clave para detección rápida en parse_update
+DIET_KEYWORDS = (
+    r'restrict|vegetar|veggie|vegan|pescatar|celi[aá]c|gluten|tacc|'
+    r'lactosa|al[eé]rgic|diab[eé]t|frutos?\s+secos?|mariscos?|kosher|halal'
+)
+
 DIET_PATTERNS = [
-    (r'(\d+)\s*vegetarian[oa]s?',  lambda m: f"{m.group(1)}x vegetariano/a"),
-    (r'un[ao]\s+vegetarian[oa]',   lambda m: "1x vegetariano/a"),
-    (r'(\d+)\s*vegan[oa]s?',       lambda m: f"{m.group(1)}x vegano/a"),
-    (r'un[ao]\s+vegan[oa]',        lambda m: "1x vegano/a"),
-    (r'(\d+)\s*celi[aá]c[oa]s?',   lambda m: f"{m.group(1)}x celíaco/a"),
-    (r'un[ao]\s+celi[aá]c[oa]',    lambda m: "1x celíaco/a"),
-    (r'(\d+)\s*sin\s+gluten',      lambda m: f"{m.group(1)}x sin gluten"),
-    (r'sin\s+gluten',              lambda m: "1x sin gluten"),
-    (r'(\d+)\s*sin\s+lactosa',     lambda m: f"{m.group(1)}x sin lactosa"),
-    (r'sin\s+lactosa',             lambda m: "1x sin lactosa"),
-    (r'(\d+)\s*alérgic[oa]s?',     lambda m: f"{m.group(1)}x alergia"),
-    (r'un[ao]\s+alérgic[oa]',      lambda m: "1x alergia"),
+    # vegetariano / veggie
+    (rf'{_NUM}\s*(?:vegetarian[oa]s?|veggies?)',    lambda m: f"{_n(m)}x vegetariano/a"),
+    (r'un[ao]?\s+(?:vegetarian[oa]|veggie)',         lambda m: "1x vegetariano/a"),
+    # vegano (estricto)
+    (rf'{_NUM}\s*vegan[oa]s?',                       lambda m: f"{_n(m)}x vegano/a"),
+    (r'un[ao]?\s+vegan[oa]',                         lambda m: "1x vegano/a"),
+    # pescatariano
+    (rf'{_NUM}\s*pescatarian[oa]s?',                 lambda m: f"{_n(m)}x pescatariano/a"),
+    (r'un[ao]?\s+pescatarian[oa]',                   lambda m: "1x pescatariano/a"),
+    # celíaco / sin TACC / gluten free
+    (rf'{_NUM}\s*celi[aá]c[oa]s?',                   lambda m: f"{_n(m)}x celíaco/a (sin TACC)"),
+    (r'un[ao]?\s+celi[aá]c[oa]',                     lambda m: "1x celíaco/a (sin TACC)"),
+    (rf'{_NUM}\s*sin\s+tacc',                         lambda m: f"{_n(m)}x sin TACC"),
+    (r'sin\s+tacc',                                   lambda m: "1x sin TACC"),
+    (rf'{_NUM}\s*(?:sin\s+gluten|gluten\s*free)',     lambda m: f"{_n(m)}x sin gluten"),
+    (r'(?:sin\s+gluten|gluten\s*free)',               lambda m: "1x sin gluten"),
+    # sin lactosa
+    (rf'{_NUM}\s*sin\s+lactosa',                      lambda m: f"{_n(m)}x sin lactosa"),
+    (r'sin\s+lactosa',                                lambda m: "1x sin lactosa"),
+    # diabético
+    (rf'{_NUM}\s*diab[eé]tic[oa]s?',                 lambda m: f"{_n(m)}x diabético/a"),
+    (r'un[ao]?\s+diab[eé]tic[oa]',                   lambda m: "1x diabético/a"),
+    # alergia a frutos secos
+    (r'alergi[ao]\s+(?:a\s+)?frutos?\s+secos?',      lambda m: "alergia frutos secos"),
+    (r'frutos?\s+secos?',                             lambda m: "alergia frutos secos"),
+    # alergia a mariscos
+    (r'alergi[ao]\s+(?:a\s+)?mariscos?',             lambda m: "alergia mariscos"),
+    (r'alergi[ao]\s+(?:a\s+)?nueces?',               lambda m: "alergia nueces"),
+    # alergia genérica
+    (rf'{_NUM}\s*al[eé]rgic[oa]s?\s+a\s+(\w+)',      lambda m: f"{_n(m)}x alergia a {m.group(2)}"),
+    (rf'{_NUM}\s*al[eé]rgic[oa]s?',                  lambda m: f"{_n(m)}x alergia"),
+    (r'un[ao]?\s+al[eé]rgic[oa]',                    lambda m: "1x alergia"),
+    # kosher / halal
+    (r'kosher',                                       lambda m: "kosher"),
+    (r'halal',                                        lambda m: "halal"),
 ]
 
 
@@ -107,6 +227,16 @@ def parse_message(text: str) -> dict:
                     result['date'] = date(year, month, day)
                 except ValueError:
                     pass
+
+    # ── Cliente / nombre de reserva ───────────────────────────────────────────
+    result['client'] = None
+    client_m = re.search(
+        r'(?:reserva|cliente|contacto)\s+(?:de\s+)?'
+        r'([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
+        text, re.IGNORECASE
+    )
+    if client_m:
+        result['client'] = client_m.group(1).strip().title()
 
     # ── Guía ─────────────────────────────────────────────────────────────────
     # La segunda palabra NO puede ser una palabra clave (hotel, pax, hay, etc.)
@@ -178,8 +308,12 @@ def parse_update(text: str) -> dict | None:
         action = 'resend_planilla'
     elif re.search(rf'reenv[ií]a[r]?|mand[aá][r]?\s+de\s+nuevo|pas[aá]me\s+(?:la\s+)?plan', t):
         action = 'resend_planilla'
-    elif re.search(r'agrega[r]?|añadi[r]?|suma[r]?|hay\s+un[ao]?|tiene[n]?\s+un[ao]?', t) and re.search(
-            r'restrict|vegetar|vegan|celi[aá]c|gluten|lactosa|alérgic', t):
+    elif re.search(r'como\s+restricci[oó]n', t):
+        # formato libre: "agrega X como restriccion"
+        action = 'update_restrictions'
+    elif re.search(DIET_KEYWORDS, t) and re.search(
+            r'agrega[r]?|añadi[r]?|suma[r]?|hay\s+(?:un[ao]?|\d+|uno|dos|tres|cuatro|cinco)|'
+            r'tiene[n]?\s+(?:un[ao]?|\d+|uno|dos|tres)', t):
         action = 'update_restrictions'
 
     if not action:
@@ -288,12 +422,17 @@ def parse_update(text: str) -> dict | None:
             result['new_value'] = hotel_m.group(1).strip().title()
 
     elif action == 'update_restrictions':
-        restrictions = []
-        for pattern, formatter in DIET_PATTERNS:
-            m = re.search(pattern, t)
-            if m:
-                restrictions.append(formatter(m))
-        result['new_value'] = ', '.join(restrictions) if restrictions else None
+        # Formato libre: "agrega X como restriccion"
+        freeform_m = re.search(r'agrega[r]?\s+(.+?)\s+como\s+restricci[oó]n', text, re.IGNORECASE)
+        if freeform_m:
+            result['new_value'] = freeform_m.group(1).strip().title()
+        else:
+            restrictions = []
+            for pattern, formatter in DIET_PATTERNS:
+                m = re.search(pattern, t)
+                if m:
+                    restrictions.append(formatter(m))
+            result['new_value'] = ', '.join(restrictions) if restrictions else None
 
     return result
 

@@ -30,9 +30,15 @@ def init_db():
                 dietary_restrictions TEXT,
                 hora                 TEXT,
                 planilla_path        TEXT,
+                cancelled            INTEGER DEFAULT 0,
                 created_at           TEXT DEFAULT (datetime('now'))
             )
         ''')
+        # Migración: agregar columna cancelled si no existe
+        try:
+            conn.execute('ALTER TABLE excursions ADD COLUMN cancelled INTEGER DEFAULT 0')
+        except Exception:
+            pass
         conn.execute('''
             CREATE TABLE IF NOT EXISTS settings (
                 key   TEXT PRIMARY KEY,
@@ -76,11 +82,6 @@ def get_excursions_for_date(target_date: date) -> list:
 def find_excursions(target_date: date, identifier: str = None, identifier_type: str = None) -> list:
     """Busca excursiones por fecha y opcionalmente por guía o cliente."""
     with get_conn() as conn:
-        # Asegurar columna cancelled
-        try:
-            conn.execute('ALTER TABLE excursions ADD COLUMN cancelled INTEGER DEFAULT 0')
-        except Exception:
-            pass
         if identifier and identifier_type == 'guide':
             rows = conn.execute(
                 'SELECT * FROM excursions WHERE date=? AND guide LIKE ? AND (cancelled IS NULL OR cancelled=0)',

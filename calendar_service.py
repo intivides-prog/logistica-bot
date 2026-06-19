@@ -1,8 +1,6 @@
-
 """
 Integración con Google Calendar.
-Requiere: GOOGLE_CREDENTIALS_FILE (service account JSON) y GOOGLE_CALENDAR_ID
-Instrucciones de setup en README.md
+Requiere: GOOGLE_CREDENTIALS_JSON (contenido del JSON de service account) y GOOGLE_CALENDAR_ID
 """
 import os
 import json
@@ -16,8 +14,7 @@ except ImportError:
     GOOGLE_AVAILABLE = False
  
 SCOPES = ['https://www.googleapis.com/auth/calendar']
-CREDENTIALS_FILE = os.environ.get('GOOGLE_CREDENTIALS_FILE', 'google_credentials.json')
-CALENDAR_ID      = os.environ.get('GOOGLE_CALENDAR_ID', 'primary')
+CALENDAR_ID = os.environ.get('GOOGLE_CALENDAR_ID', 'primary')
  
 # Abreviaciones de sitios para el título del calendario
 SITE_SHORT = {
@@ -55,8 +52,12 @@ def _build_cal_title(activity: str, site: str, pax, gtype: str) -> str:
 def _get_service():
     if not GOOGLE_AVAILABLE:
         raise RuntimeError("google-api-python-client no instalado")
-    creds = service_account.Credentials.from_service_account_file(
-        CREDENTIALS_FILE, scopes=SCOPES
+    creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+    if not creds_json:
+        raise RuntimeError("GOOGLE_CREDENTIALS_JSON no configurado")
+    creds_info = json.loads(creds_json)
+    creds = service_account.Credentials.from_service_account_info(
+        creds_info, scopes=SCOPES
     )
     return build('calendar', 'v3', credentials=creds)
  
@@ -66,7 +67,7 @@ def add_excursion(params: dict) -> str | None:
     Agrega la excursión al Google Calendar.
     Devuelve el link del evento o None si falla.
     """
-    if not os.path.exists(CREDENTIALS_FILE):
+    if not os.environ.get('GOOGLE_CREDENTIALS_JSON'):
         return None   # Calendar no configurado — silencioso
  
     excursion_date = params.get('date')
@@ -115,3 +116,4 @@ def add_excursion(params: dict) -> str | None:
     except Exception as e:
         print(f"[Calendar] Error: {e}")
         return None
+ 

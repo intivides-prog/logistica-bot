@@ -61,6 +61,7 @@ def upload_file(filepath: str, filename: str) -> str | None:
         ).execute()
         return result.get('webViewLink')
     except Exception as e:
+        import traceback
         print(f"[Drive] Error: {e}")
+        print(f"[Drive] Traceback: {traceback.format_exc()}")
         return None
- 

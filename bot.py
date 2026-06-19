@@ -121,27 +121,74 @@ async def handle_update_request(update: Update, upd: dict):
     # Buscar excursiones
     logger.info(f"[UPDATE] action={action} date={target_date} identifier={identifier} id_type={id_type}")
     matches = db.find_excursions(target_date, identifier, id_type)
-    logger.info(f"[UPDATE] matches encontrados: {len(matches)} → {matches}")
+ 
+    # Si no encontró con identificador, intentar sin él (por si el nombre no matchea exacto)
+    if not matches and identifier:
+        matches = db.find_excursions(target_date)
+ 
+    logger.info(f"[UPDATE] matches encontrados: {len(matches)}")
  
     if not matches:
-        hint = f" con guía {identifier}" if identifier else ""
+        hint = f" ({identifier})" if identifier else ""
         await update.message.reply_text(
-            f"No encontré excursiones para el {target_date.strftime('%d/%m/%Y')}{hint}. "
-            f"Verificá la fecha y el nombre."
+            f"No encontré excursiones para el {target_date.strftime('%d/%m/%Y')}{hint}.\n"
+            f"Usá /proximas para ver las salidas registradas."
         )
         return
  
-    if len(matches) > 1 and not identifier:
+    if len(matches) > 1:
         lines = [f"• {ex['activity']} — Guía: {ex['guide'] or '?'}" for ex in matches]
         await update.message.reply_text(
-            f"Hay {len(matches)} salidas ese día. Especificá el guía o el apellido del cliente:\n" +
-            '\n'.join(lines)
+            f"Hay {len(matches)} salidas ese día. ¿Cuál querés modificar?\n" +
+            '\n'.join(lines) +
+            "\n\nEspecificá el nombre del guía."
         )
         return
  
     exc = matches[0]
     exc_id = exc['id']
     fecha_str = target_date.strftime('%d/%m/%Y')
+ 
+    # ── Helper: actualiza evento en Google Calendar ───────────────────────────
+    async def _sync_calendar(updated_field: str, updated_val):
+        event_id = exc.get('calendar_event_id')
+        if not event_id:
+            return
+        from datetime import date as _date
+        params = dict(exc)
+        try:
+            params['date'] = _date.fromisoformat(params['date']) if isinstance(params['date'], str) else params['date']
+        except Exception:
+            return
+        params[updated_field] = updated_val
+        try:
+            ok = calendar_service.update_excursion(event_id, params)
+            if not ok:
+                logger.warning(f"[Calendar] No se pudo actualizar evento {event_id}")
+        except Exception as e:
+            logger.error(f"[Calendar] Error actualizando evento: {e}")
+ 
+    # ── Helper: regenera planilla con datos actualizados ─────────────────────
+    async def _regenerate_planilla():
+        try:
+            from datetime import date as _date
+            exc_date = _date.fromisoformat(exc['date']) if isinstance(exc['date'], str) else exc['date']
+            rows = db.find_excursions(exc_date)
+            row = next((e for e in rows if e['id'] == exc_id), None)
+            if not row:
+                return
+            row_date = _date.fromisoformat(row['date']) if isinstance(row['date'], str) else row['date']
+            from generator import generate_planilla
+            params = {**row, 'date': row_date}
+            filepath, filename = generate_planilla(params)
+            with open(filepath, 'rb') as f:
+                await update.message.reply_document(
+                    document=f,
+                    filename=filename,
+                    caption="📋 Planilla actualizada"
+                )
+        except Exception as e:
+            logger.error(f"[Planilla] Error regenerando: {e}")
  
     if action == 'cancel':
         db.cancel_excursion(exc_id)
@@ -155,55 +202,77 @@ async def handle_update_request(update: Update, upd: dict):
             await update.message.reply_text("No entendí la nueva hora. Ejemplo: _\"a las 10hs\"_", parse_mode='Markdown')
             return
         db.update_excursion(exc_id, 'hora', new_value)
+        await _sync_calendar('hora', new_value)
         await update.message.reply_text(
             f"✅ Hora actualizada a *{new_value}*\n"
             f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
             parse_mode='Markdown'
         )
+        await _regenerate_planilla()
  
     elif action == 'update_guide':
         if not new_value:
             await update.message.reply_text("No entendí el nuevo guía. Ejemplo: _\"cambia el guía de la salida del 25/6 guía Julián a Rodri\"_", parse_mode='Markdown')
             return
         db.update_excursion(exc_id, 'guide', new_value)
+        await _sync_calendar('guide', new_value)
         await update.message.reply_text(
             f"✅ Guía actualizado a *{new_value}*\n"
             f"{exc['activity']} — {fecha_str}",
             parse_mode='Markdown'
         )
+        await _regenerate_planilla()
  
     elif action == 'update_date':
         if not new_value:
             await update.message.reply_text("No entendí la nueva fecha. Ejemplo: _\"cambia el día de la salida del 25/6 guía Julián al 27/6\"_", parse_mode='Markdown')
             return
         db.update_excursion(exc_id, 'date', new_value)
+        await _sync_calendar('date', new_value)
         await update.message.reply_text(
             f"✅ Fecha actualizada al *{new_value.strftime('%d/%m/%Y')}*\n"
             f"{exc['activity']} — Guía: {exc['guide'] or '—'}",
             parse_mode='Markdown'
         )
+        await _regenerate_planilla()
  
     elif action == 'update_site':
         if not new_value:
             await update.message.reply_text("No entendí el nuevo lugar. Mencioná el sitio (ej: mascardi, llao, tres reyes).")
             return
         db.update_excursion(exc_id, 'site', new_value)
+        await _sync_calendar('site', new_value)
         await update.message.reply_text(
             f"✅ Lugar actualizado a *{new_value}*\n"
             f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
             parse_mode='Markdown'
         )
+        await _regenerate_planilla()
  
     elif action == 'update_pax':
         if not new_value:
             await update.message.reply_text("No entendí la nueva cantidad. Ejemplo: _\"son 6 pax ahora\"_", parse_mode='Markdown')
             return
         db.update_excursion(exc_id, 'pax', new_value)
+        await _sync_calendar('pax', new_value)
         await update.message.reply_text(
             f"✅ Pax actualizado a *{new_value}*\n"
             f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
             parse_mode='Markdown'
         )
+        await _regenerate_planilla()
+ 
+    elif action == 'update_hotel':
+        if not new_value:
+            await update.message.reply_text("No entendí el hotel. Ejemplo: _\"agrega el hotel Llao Llao\"_", parse_mode='Markdown')
+            return
+        db.update_excursion(exc_id, 'hotel', new_value)
+        await update.message.reply_text(
+            f"✅ Hotel actualizado a *{new_value}*\n"
+            f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
+            parse_mode='Markdown'
+        )
+        await _regenerate_planilla()
  
     elif action == 'update_restrictions':
         if not new_value:
@@ -215,6 +284,7 @@ async def handle_update_request(update: Update, upd: dict):
             f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
             parse_mode='Markdown'
         )
+        await _regenerate_planilla()
  
  
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -258,15 +328,18 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     with tempfile.TemporaryDirectory() as tmpdir:
         filepath = generator.generate(parsed, output_dir=tmpdir)
  
-        # Guardar en DB
-        exc_id = db.save_excursion({**parsed, 'planilla_path': filepath})
+        # (exc_id ya guardado arriba con calendar_event_id)
  
         # Google Calendar
+        cal_event_id = None
+        cal_link = None
         try:
-            cal_link = calendar_service.add_excursion(parsed)
+            cal_event_id, cal_link = calendar_service.add_excursion(parsed)
         except Exception as e:
             logger.error(f"[Calendar] Error: {e}")
-            cal_link = None
+ 
+        # Guardar en DB con event_id
+        exc_id = db.save_excursion({**parsed, 'planilla_path': filepath, 'calendar_event_id': cal_event_id})
  
         # Google Drive
         try:

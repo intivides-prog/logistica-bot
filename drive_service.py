@@ -58,6 +58,7 @@ def upload_file(filepath: str, filename: str) -> str | None:
             body=file_metadata,
             media_body=media,
             fields='id,webViewLink',
+            supportsAllDrives=True,
         ).execute()
         return result.get('webViewLink')
     except Exception as e:

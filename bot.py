@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 TOKEN       = os.environ['TELEGRAM_TOKEN']
 OWNER_ID    = int(os.environ.get('TELEGRAM_OWNER_ID', '0'))  # tu chat_id
 
+# Planillas pendientes de confirmación: chat_id -> parsed dict
+PENDING_PLANILLAS: dict = {}
+
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
@@ -178,15 +181,16 @@ async def handle_update_request(update: Update, upd: dict):
             if not row:
                 return
             row_date = _date.fromisoformat(row['date']) if isinstance(row['date'], str) else row['date']
-            from generator import generate_planilla
             params = {**row, 'date': row_date}
-            filepath, filename = generate_planilla(params)
-            with open(filepath, 'rb') as f:
-                await update.message.reply_document(
-                    document=f,
-                    filename=filename,
-                    caption="📋 Planilla actualizada"
-                )
+            with tempfile.TemporaryDirectory() as tmpdir:
+                filepath = generator.generate(params, output_dir=tmpdir)
+                filename = os.path.basename(filepath)
+                with open(filepath, 'rb') as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=filename,
+                        caption="📋 Planilla actualizada"
+                    )
         except Exception as e:
             logger.error(f"[Planilla] Error regenerando: {e}")
 
@@ -297,67 +301,32 @@ async def handle_update_request(update: Update, upd: dict):
                 await update.message.reply_text("No encontré los datos de esa excursión.")
                 return
             row_date = _date.fromisoformat(row['date']) if isinstance(row['date'], str) else row['date']
-            from generator import generate_planilla
             params = {**row, 'date': row_date}
-            filepath, filename = generate_planilla(params)
-            with open(filepath, 'rb') as f:
-                await update.message.reply_document(
-                    document=f,
-                    filename=filename,
-                    caption=(
-                        f"📋 {row['activity']} — {exc_date.strftime('%d/%m/%Y')}\n"
-                        f"Guía: {row['guide'] or '—'} | Pax: {row['pax']} | Hora: {row['hora'] or '09:00 hs'}"
+            with tempfile.TemporaryDirectory() as tmpdir:
+                filepath = generator.generate(params, output_dir=tmpdir)
+                filename = os.path.basename(filepath)
+                with open(filepath, 'rb') as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=filename,
+                        caption=(
+                            f"📋 {row['activity']} — {exc_date.strftime('%d/%m/%Y')}\n"
+                            f"Guía: {row['guide'] or '—'} | Pax: {row['pax']} | Hora: {row['hora'] or '09:00 hs'}"
+                        )
                     )
-                )
         except Exception as e:
             logger.error(f"[Resend] Error: {e}")
             await update.message.reply_text("No pude regenerar la planilla. Intentá de nuevo.")
 
 
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ''
-    t = text.lower()
-
-    # Detectar si es una actualización
-    upd = msg_parser.parse_update(text)
-    if upd:
-        await handle_update_request(update, upd)
-        return
-
-    # Solo responder si parece un pedido de planilla
-    keywords = ['plani', 'planilla', 'kayak', 'mtb', 'trekking', 'naveg']
-    if not any(k in t for k in keywords):
-        await update.message.reply_text(
-            "No entendí el pedido. Intentá con algo como:\n"
-            "_\"Planilla kayak mascardi 4 pax 14/4 guía Julián\"_",
-            parse_mode='Markdown'
-        )
-        return
-
-    # Parsear mensaje
-    parsed = msg_parser.parse_message(text)
-    missing = msg_parser.format_missing(parsed)
-
-    if missing:
-        await update.message.reply_text(
-            f"Casi! Faltaría:\n• " + '\n• '.join(missing) +
-            "\n\nAgregá esos datos y lo genero al toque.",
-            parse_mode='Markdown'
-        )
-        return
-
-    # Guardar chat_id si no está
+async def _generate_and_send(update: Update, parsed: dict):
+    """Genera la planilla y la envía. Usado tanto en creación como en confirmación."""
     db.save_setting('chat_id', str(update.effective_chat.id))
-
-    # Generar planilla
     await update.message.reply_text("⏳ Generando planilla...")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         filepath = generator.generate(parsed, output_dir=tmpdir)
 
-        # (exc_id ya guardado arriba con calendar_event_id)
-
-        # Google Calendar
         cal_event_id = None
         cal_link = None
         try:
@@ -365,17 +334,14 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"[Calendar] Error: {e}")
 
-        # Guardar en DB con event_id
-        exc_id = db.save_excursion({**parsed, 'planilla_path': filepath, 'calendar_event_id': cal_event_id})
+        db.save_excursion({**parsed, 'planilla_path': filepath, 'calendar_event_id': cal_event_id})
 
-        # Google Drive
         try:
             drive_link = drive_service.upload_file(filepath, os.path.basename(filepath))
         except Exception as e:
             logger.error(f"[Drive] Error: {e}")
             drive_link = None
 
-        # Armar respuesta
         fecha_str = parsed['date'].strftime('%d/%m/%Y') if parsed.get('date') else '—'
         caption = (
             f"✅ *{parsed['activity']}*\n"
@@ -383,6 +349,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📅 {fecha_str}  |  👥 {parsed['pax']} pax\n"
             f"👤 Guía: {parsed.get('guide') or '(pendiente)'}"
         )
+        if parsed.get('client'):
+            caption += f"\n🪪 Reserva: {parsed['client']}"
+        if parsed.get('hotel'):
+            caption += f"\n🏨 Hotel: {parsed['hotel']}"
         if parsed.get('dietary_restrictions'):
             caption += f"\n⚠️ Restricciones: {parsed['dietary_restrictions']}"
         if cal_link:
@@ -390,7 +360,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if drive_link:
             caption += f"\n📁 [Ver en Drive]({drive_link})"
 
-        # Enviar archivo
         with open(filepath, 'rb') as f:
             await update.message.reply_document(
                 document=f,
@@ -398,6 +367,106 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 caption=caption,
                 parse_mode='Markdown'
             )
+
+
+async def handle_date_query(update: Update, query_date: date):
+    """Muestra las excursiones de una fecha consultada en lenguaje natural."""
+    excursions = db.get_excursions_for_date(query_date)
+    # Filtrar canceladas
+    excursions = [e for e in excursions if not e.get('cancelled')]
+
+    day_names = ['lunes','martes','miércoles','jueves','viernes','sábado','domingo']
+    day_name = day_names[query_date.weekday()]
+    fecha_str = f"{day_name} {query_date.strftime('%d/%m/%Y')}"
+
+    if not excursions:
+        await update.message.reply_text(f"No hay salidas registradas para el {fecha_str}.")
+        return
+
+    lines = [f"📅 *Salidas del {fecha_str}:*\n"]
+    for ex in excursions:
+        hora = ex.get('hora') or '09:00 hs'
+        guide = ex.get('guide') or '(sin guía)'
+        hotel = f" — Hotel: {ex['hotel']}" if ex.get('hotel') else ''
+        pax = ex.get('pax') or '?'
+        restr = f"\n   ⚠️ {ex['dietary_restrictions']}" if ex.get('dietary_restrictions') else ''
+        lines.append(
+            f"• *{ex['activity']}* {ex.get('site','')}\n"
+            f"   🕐 {hora} | 👥 {pax} pax | 👤 {guide}{hotel}{restr}"
+        )
+
+    await update.message.reply_text('\n'.join(lines), parse_mode='Markdown')
+
+
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text or ''
+    t = text.lower().strip()
+    chat_id = update.effective_chat.id
+
+    # ── Confirmación de planilla pendiente ────────────────────────────────────
+    if re.search(r'^s[ií]$|^dale$|^ok$|^generar?$|^confirm[ao]$|^anda$|^va$', t):
+        pending = PENDING_PLANILLAS.pop(chat_id, None)
+        if pending:
+            await _generate_and_send(update, pending)
+            return
+    if re.search(r'^no$|^cancel[ao]$|^nop[eo]?$', t):
+        if PENDING_PLANILLAS.pop(chat_id, None):
+            await update.message.reply_text("Cancelado. Podés mandarme el pedido de nuevo cuando quieras.")
+            return
+
+    # ── Consulta de fecha en lenguaje natural ─────────────────────────────────
+    query_date = msg_parser.parse_date_query(text)
+    if query_date:
+        await handle_date_query(update, query_date)
+        return
+
+    # ── Actualización de excursión existente ──────────────────────────────────
+    upd = msg_parser.parse_update(text)
+    if upd:
+        await handle_update_request(update, upd)
+        return
+
+    # ── Pedido de planilla nueva ───────────────────────────────────────────────
+    keywords = ['plani', 'planilla', 'kayak', 'mtb', 'trekking', 'naveg']
+    if not any(k in t for k in keywords):
+        await update.message.reply_text(
+            "No entendí el pedido. Intentá con algo como:\n"
+            "_\"Kayak mascardi 4 pax 14/4 guía Julián\"_",
+            parse_mode='Markdown'
+        )
+        return
+
+    parsed = msg_parser.parse_message(text)
+    missing = msg_parser.format_missing(parsed)
+
+    if missing:
+        await update.message.reply_text(
+            "Casi! Faltaría:\n• " + '\n• '.join(missing) +
+            "\n\nAgregá esos datos y lo genero al toque.",
+            parse_mode='Markdown'
+        )
+        return
+
+    # Confirmación antes de generar
+    fecha_str = parsed['date'].strftime('%d/%m/%Y') if parsed.get('date') else '—'
+    resumen = (
+        f"Entendí esto:\n"
+        f"• *{parsed['activity']}* — {parsed.get('site') or '(sitio no especificado)'}\n"
+        f"• Fecha: {fecha_str}  |  Pax: {parsed['pax']}\n"
+        f"• Guía: {parsed.get('guide') or '(no especificado)'}"
+    )
+    if parsed.get('client'):
+        resumen += f"\n• Reserva: {parsed['client']}"
+    if parsed.get('hotel'):
+        resumen += f"\n• Hotel: {parsed['hotel']}"
+    if parsed.get('hora'):
+        resumen += f"\n• Hora: {parsed['hora']}"
+    if parsed.get('dietary_restrictions'):
+        resumen += f"\n• Restricciones: {parsed['dietary_restrictions']}"
+    resumen += "\n\n¿Genero la planilla? _(sí / no)_"
+
+    PENDING_PLANILLAS[chat_id] = parsed
+    await update.message.reply_text(resumen, parse_mode='Markdown')
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -144,17 +144,23 @@ def parse_update(text: str) -> dict | None:
     """
     t = text.lower().strip()
  
+    VERBS = r'(?:cambia[r]?|modifica[r]?|actualiza[r]?|correg[ií][r]?|ponele?|pone[r]?|mov[eé][r]?|actualiz[ao])'
+ 
     # Detectar acción
     action = None
-    if re.search(r'cancel[ao]', t):
+    if re.search(r'cancel[ao]|no\s+va|se\s+cancela|suspende', t):
         action = 'cancel'
-    elif re.search(r'cambia[r]?\s+(?:la\s+)?hora|nueva\s+hora', t):
+    elif re.search(rf'{VERBS}\s+(?:el\s+|la\s+)?(?:hora|horario)|nueva\s+hora|cambi[oó]\s+(?:la\s+)?hora', t):
         action = 'update_hora'
-    elif re.search(r'cambia[r]?\s+(?:el\s+)?gu[ií]a', t):
+    elif re.search(rf'{VERBS}\s+(?:el\s+)?(?:gu[ií]a|guia)|nuevo\s+gu[ií]a|cambi[oó]\s+(?:el\s+)?gu[ií]a', t):
         action = 'update_guide'
-    elif re.search(r'cambia[r]?\s+(?:el\s+)?d[ií]a|cambia[r]?\s+(?:la\s+)?fecha', t):
+    elif re.search(rf'{VERBS}\s+(?:el\s+)?(?:d[ií]a|fecha)|nueva\s+fecha|cambi[oó]\s+(?:la\s+)?fecha|mov[eé]la?\s+al?', t):
         action = 'update_date'
-    elif re.search(r'agrega[r]?|añadi[r]?|suma[r]?', t) and re.search(
+    elif re.search(rf'{VERBS}\s+(?:el\s+)?(?:lugar|sitio|locaci[oó]n)|nueva\s+(?:lugar|sitio)|cambi[oó]\s+(?:el\s+)?(?:lugar|sitio)', t):
+        action = 'update_site'
+    elif re.search(rf'{VERBS}\s+(?:los?\s+)?(?:pax|pasajeros?|cantidad)|son\s+\d+\s+pax\s+ahora|ahora\s+son\s+\d+', t):
+        action = 'update_pax'
+    elif re.search(r'agrega[r]?|añadi[r]?|suma[r]?|hay\s+un[ao]?|tiene[n]?\s+un[ao]?', t) and re.search(
             r'restrict|vegetar|vegan|celi[aá]c|gluten|lactosa|alérgic', t):
         action = 'update_restrictions'
  
@@ -199,15 +205,17 @@ def parse_update(text: str) -> dict | None:
  
     # Extraer nuevo valor según acción
     if action == 'update_hora':
-        hora_m = re.search(r'(?:a\s+las?\s+)?(\d{1,2})[:.h](\d{2})?\s*hs?', t)
+        hora_m = re.search(r'(?:a\s+las?\s+)?(\d{1,2})(?:[:.h](\d{2}))?\s*(?:hs?|am|pm)\b', t)
         if hora_m:
-            h = hora_m.group(1)
+            h = int(hora_m.group(1))
             m2 = hora_m.group(2) or '00'
+            if 'pm' in t and h < 12:
+                h += 12
             result['new_value'] = f"{h}:{m2} hs"
  
     elif action == 'update_guide':
         new_m = re.search(
-            r'(?:a|por)\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)(?:\s*$)',
+            r'(?:a|por|es|ser[aá])\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)(?:\s*$)',
             text, re.IGNORECASE
         )
         if new_m:
@@ -224,6 +232,17 @@ def parse_update(text: str) -> dict | None:
                 result['new_value'] = date(year2, month2, day2)
             except ValueError:
                 pass
+ 
+    elif action == 'update_site':
+        for key, val in SITES.items():
+            if key in t:
+                result['new_value'] = val
+                break
+ 
+    elif action == 'update_pax':
+        pax_m = re.search(r'(\d+)\s*pax', t) or re.search(r'son\s+(\d+)|ahora\s+son\s+(\d+)', t)
+        if pax_m:
+            result['new_value'] = int(next(g for g in pax_m.groups() if g))
  
     elif action == 'update_restrictions':
         restrictions = []

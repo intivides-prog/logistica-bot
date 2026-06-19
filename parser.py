@@ -309,12 +309,15 @@ def parse_update(text: str) -> dict | None:
     elif re.search(rf'reenv[ií]a[r]?|mand[aá][r]?\s+de\s+nuevo|pas[aá]me\s+(?:la\s+)?plan', t):
         action = 'resend_planilla'
     elif re.search(r'como\s+restricci[oó]n', t):
-        # formato libre: "agrega X como restriccion"
+        action = 'update_restrictions'
+    elif re.search(DIET_KEYWORDS, t) and re.search(r'agrega[r]?|añadi[r]?|suma[r]?', t):
         action = 'update_restrictions'
     elif re.search(DIET_KEYWORDS, t) and re.search(
-            r'agrega[r]?|añadi[r]?|suma[r]?|hay\s+(?:un[ao]?|\d+|uno|dos|tres|cuatro|cinco)|'
-            r'tiene[n]?\s+(?:un[ao]?|\d+|uno|dos|tres)', t):
-        action = 'update_restrictions'
+            r'hay\s+(?:un[ao]?|\d+|uno|dos|tres|cuatro|cinco)|tiene[n]?\s+(?:un[ao]?|\d+)', t):
+        # "hay 2 celíacos" — solo es update si NO hay actividad en el mensaje
+        # (con actividad = pedido nuevo de planilla)
+        if not re.search(r'kayak|mtb|mountain bike|trekking|trek|naveg', t):
+            action = 'update_restrictions'
 
     if not action:
         return None
@@ -352,7 +355,7 @@ def parse_update(text: str) -> dict | None:
     except ValueError:
         return None
 
-    STOP_WORDS = {'el', 'la', 'los', 'las', 'en', 'al', 'del', 'un', 'una', 'de', 'para', 'con'}
+    STOP_WORDS = {'el', 'la', 'los', 'las', 'en', 'al', 'del', 'un', 'una', 'de', 'para', 'con', 'hotel', 'pax', 'hay', 'reserva'}
 
     # Identificador — guía o cliente
     guide_m = re.search(

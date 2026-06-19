@@ -119,7 +119,9 @@ async def handle_update_request(update: Update, upd: dict):
     new_value   = upd.get('new_value')
  
     # Buscar excursiones
+    logger.info(f"[UPDATE] action={action} date={target_date} identifier={identifier} id_type={id_type}")
     matches = db.find_excursions(target_date, identifier, id_type)
+    logger.info(f"[UPDATE] matches encontrados: {len(matches)} → {matches}")
  
     if not matches:
         hint = f" con guía {identifier}" if identifier else ""

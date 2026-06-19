@@ -17,6 +17,7 @@ import parser as msg_parser
 import generator
 import scheduler as sched_module
 import calendar_service
+import drive_service
  
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -143,6 +144,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.error(f"[Calendar] Error: {e}")
             cal_link = None
  
+        # Google Drive
+        try:
+            drive_link = drive_service.upload_file(filepath, os.path.basename(filepath))
+        except Exception as e:
+            logger.error(f"[Drive] Error: {e}")
+            drive_link = None
+ 
         # Armar respuesta
         fecha_str = parsed['date'].strftime('%d/%m/%Y') if parsed.get('date') else '—'
         caption = (
@@ -155,6 +163,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             caption += f"\n⚠️ Restricciones: {parsed['dietary_restrictions']}"
         if cal_link:
             caption += f"\n📆 [Ver en Calendar]({cal_link})"
+        if drive_link:
+            caption += f"\n📁 [Ver en Drive]({drive_link})"
  
         # Enviar archivo
         with open(filepath, 'rb') as f:

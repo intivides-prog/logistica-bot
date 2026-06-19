@@ -13,7 +13,10 @@ try:
 except ImportError:
     GOOGLE_AVAILABLE = False
  
-SCOPES = ['https://www.googleapis.com/auth/calendar']
+SCOPES = [
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/drive',
+]
 CALENDAR_ID = os.environ.get('GOOGLE_CALENDAR_ID', 'primary')
  
 # Abreviaciones de sitios para el título del calendario

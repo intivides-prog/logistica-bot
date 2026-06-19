@@ -6,10 +6,10 @@ Ejemplos que entiende:
   "kayak mascardi 5 pax 15/3, guia rodri, 2 vegetarianos"
   "fd kayak tres reyes 6 pax 20/4 julian donatelli"
 """
-
+ 
 import re
 from datetime import date, datetime
-
+ 
 SITES = {
     'mascardi':     'Lago Mascardi',
     'tres reyes':   'Tres Reyes',
@@ -20,12 +20,12 @@ SITES = {
     'traful':       'Lago Traful',
     'espejo':       'Lago Espejo',
 }
-
+ 
 MONTHS_ES = {
     'enero':1,'febrero':2,'marzo':3,'abril':4,'mayo':5,'junio':6,
     'julio':7,'agosto':8,'septiembre':9,'octubre':10,'noviembre':11,'diciembre':12
 }
-
+ 
 DIET_PATTERNS = [
     (r'(\d+)\s*vegetarian[oa]s?',  lambda m: f"{m.group(1)}x vegetariano/a"),
     (r'un[ao]\s+vegetarian[oa]',   lambda m: "1x vegetariano/a"),
@@ -40,12 +40,12 @@ DIET_PATTERNS = [
     (r'(\d+)\s*alérgic[oa]s?',     lambda m: f"{m.group(1)}x alergia"),
     (r'un[ao]\s+alérgic[oa]',      lambda m: "1x alergia"),
 ]
-
-
+ 
+ 
 def parse_message(text: str) -> dict:
     t = text.lower().strip()
     result = {}
-
+ 
     # ── Actividad ────────────────────────────────────────────────────────────
     if ('kayak' in t and 'trekking' in t) or 'kayak y trek' in t:
         result['activity'] = 'FD Kayak y Trekking'
@@ -59,20 +59,20 @@ def parse_message(text: str) -> dict:
         result['activity'] = 'Navegación'
     else:
         result['activity'] = None
-
+ 
     # ── Modalidad FD / HD (para gastronomía) ─────────────────────────────────
     if 'hd' in t or 'half day' in t or 'medio d' in t:
         result['gastronomy_type'] = 'snacks'
     else:
         result['gastronomy_type'] = 'AC'   # default full day = almuerzo campestre
-
+ 
     # ── Sitio ─────────────────────────────────────────────────────────────────
     result['site'] = None
     for key, val in SITES.items():
         if key in t:
             result['site'] = val
             break
-
+ 
     # ── Cantidad de pax ───────────────────────────────────────────────────────
     pax_m = re.search(r'(\d+)\s*pax', t)
     if pax_m:
@@ -81,7 +81,7 @@ def parse_message(text: str) -> dict:
         # "para 4" / "de 4" sin la palabra pax
         pax_m2 = re.search(r'(?:para|de)\s+(\d+)(?!\s*/)', t)
         result['pax'] = int(pax_m2.group(1)) if pax_m2 else None
-
+ 
     # ── Fecha ─────────────────────────────────────────────────────────────────
     result['date'] = None
     # D/M o D/M/YYYY
@@ -107,7 +107,7 @@ def parse_message(text: str) -> dict:
                     result['date'] = date(year, month, day)
                 except ValueError:
                     pass
-
+ 
     # ── Guía ─────────────────────────────────────────────────────────────────
     result['guide'] = None
     guide_m = re.search(
@@ -116,7 +116,7 @@ def parse_message(text: str) -> dict:
     )
     if guide_m:
         result['guide'] = guide_m.group(1).title()
-
+ 
     # ── Hora ─────────────────────────────────────────────────────────────────
     result['hora'] = None
     hora_m = re.search(r'\b(\d{1,2})[:.h](\d{2})?\s*hs?\b', t)
@@ -124,7 +124,7 @@ def parse_message(text: str) -> dict:
         h = hora_m.group(1)
         m2 = hora_m.group(2) or '00'
         result['hora'] = f"{h}:{m2} hs"
-
+ 
     # ── Restricciones alimentarias ────────────────────────────────────────────
     restrictions = []
     for pattern, formatter in DIET_PATTERNS:
@@ -132,10 +132,110 @@ def parse_message(text: str) -> dict:
         if m:
             restrictions.append(formatter(m))
     result['dietary_restrictions'] = ', '.join(restrictions) if restrictions else None
-
+ 
     return result
-
-
+ 
+ 
+def parse_update(text: str) -> dict | None:
+    """
+    Detecta si el mensaje es una actualización de excursión existente.
+    Devuelve dict con: action, date, identifier, identifier_type, new_value
+    O None si no parece una actualización.
+    """
+    t = text.lower().strip()
+ 
+    # Detectar acción
+    action = None
+    if re.search(r'cancel[ao]', t):
+        action = 'cancel'
+    elif re.search(r'cambia[r]?\s+(?:la\s+)?hora|nueva\s+hora', t):
+        action = 'update_hora'
+    elif re.search(r'cambia[r]?\s+(?:el\s+)?gu[ií]a', t):
+        action = 'update_guide'
+    elif re.search(r'cambia[r]?\s+(?:el\s+)?d[ií]a|cambia[r]?\s+(?:la\s+)?fecha', t):
+        action = 'update_date'
+    elif re.search(r'agrega[r]?|añadi[r]?|suma[r]?', t) and re.search(
+            r'restrict|vegetar|vegan|celi[aá]c|gluten|lactosa|alérgic', t):
+        action = 'update_restrictions'
+ 
+    if not action:
+        return None
+ 
+    result = {
+        'action': action,
+        'date': None,
+        'identifier': None,
+        'identifier_type': None,
+        'new_value': None,
+    }
+ 
+    # Extraer fecha(s) — la primera es la excursión a modificar
+    all_dates = list(re.finditer(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', text))
+    if not all_dates:
+        return None
+    dm = all_dates[0]
+    day, month = int(dm.group(1)), int(dm.group(2))
+    year = int(dm.group(3)) if dm.group(3) else (
+        datetime.now().year if month >= datetime.now().month else datetime.now().year + 1
+    )
+    try:
+        result['date'] = date(year, month, day)
+    except ValueError:
+        return None
+ 
+    # Identificador — guía o cliente
+    guide_m = re.search(
+        r'gu[ií]a\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
+        text, re.IGNORECASE
+    )
+    if guide_m:
+        result['identifier'] = guide_m.group(1).strip().title()
+        result['identifier_type'] = 'guide'
+    else:
+        client_m = re.search(r'\bde\s+([A-ZÁÉÍÓÚ][a-záéíóú]+(?:\s+[A-ZÁÉÍÓÚ][a-záéíóú]+)?)', text)
+        if client_m:
+            result['identifier'] = client_m.group(1).strip()
+            result['identifier_type'] = 'client'
+ 
+    # Extraer nuevo valor según acción
+    if action == 'update_hora':
+        hora_m = re.search(r'(?:a\s+las?\s+)?(\d{1,2})[:.h](\d{2})?\s*hs?', t)
+        if hora_m:
+            h = hora_m.group(1)
+            m2 = hora_m.group(2) or '00'
+            result['new_value'] = f"{h}:{m2} hs"
+ 
+    elif action == 'update_guide':
+        new_m = re.search(
+            r'(?:a|por)\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)(?:\s*$)',
+            text, re.IGNORECASE
+        )
+        if new_m:
+            result['new_value'] = new_m.group(1).strip().title()
+ 
+    elif action == 'update_date':
+        if len(all_dates) >= 2:
+            dm2 = all_dates[1]
+            day2, month2 = int(dm2.group(1)), int(dm2.group(2))
+            year2 = int(dm2.group(3)) if dm2.group(3) else (
+                datetime.now().year if month2 >= datetime.now().month else datetime.now().year + 1
+            )
+            try:
+                result['new_value'] = date(year2, month2, day2)
+            except ValueError:
+                pass
+ 
+    elif action == 'update_restrictions':
+        restrictions = []
+        for pattern, formatter in DIET_PATTERNS:
+            m = re.search(pattern, t)
+            if m:
+                restrictions.append(formatter(m))
+        result['new_value'] = ', '.join(restrictions) if restrictions else None
+ 
+    return result
+ 
+ 
 def format_missing(parsed: dict) -> list[str]:
     """Devuelve lista de campos faltantes para pedir al usuario."""
     missing = []

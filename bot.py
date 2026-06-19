@@ -137,7 +137,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         exc_id = db.save_excursion({**parsed, 'planilla_path': filepath})
  
         # Google Calendar
-        cal_link = calendar_service.add_excursion(parsed)
+        try:
+            cal_link = calendar_service.add_excursion(parsed)
+        except Exception as e:
+            logger.error(f"[Calendar] Error: {e}")
+            cal_link = None
  
         # Armar respuesta
         fecha_str = parsed['date'].strftime('%d/%m/%Y') if parsed.get('date') else '—'

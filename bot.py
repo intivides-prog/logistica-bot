@@ -183,6 +183,28 @@ async def handle_update_request(update: Update, upd: dict):
             parse_mode='Markdown'
         )
  
+    elif action == 'update_site':
+        if not new_value:
+            await update.message.reply_text("No entendí el nuevo lugar. Mencioná el sitio (ej: mascardi, llao, tres reyes).")
+            return
+        db.update_excursion(exc_id, 'site', new_value)
+        await update.message.reply_text(
+            f"✅ Lugar actualizado a *{new_value}*\n"
+            f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
+            parse_mode='Markdown'
+        )
+ 
+    elif action == 'update_pax':
+        if not new_value:
+            await update.message.reply_text("No entendí la nueva cantidad. Ejemplo: _\"son 6 pax ahora\"_", parse_mode='Markdown')
+            return
+        db.update_excursion(exc_id, 'pax', new_value)
+        await update.message.reply_text(
+            f"✅ Pax actualizado a *{new_value}*\n"
+            f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
+            parse_mode='Markdown'
+        )
+ 
     elif action == 'update_restrictions':
         if not new_value:
             await update.message.reply_text("No entendí las restricciones. Ejemplo: _\"agrega 1 celíaco\"_", parse_mode='Markdown')

@@ -6,6 +6,7 @@ params keys: activity, site, pax, date, guide, client, hotel,
              hora, gastronomy_type, dietary_restrictions
 """
 import os
+import re
 from datetime import date
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -30,16 +31,21 @@ _bd = Border(left=_th, right=_th, top=_th, bottom=_th)
 
 PAX = "$B$6"
 
+# Reglas de bebidas (iguales en todas las salidas que las llevan)
+CERVEZA = f"=INT({PAX}*1.5)"          # 1,5 por pax, redondeo hacia abajo
+VINO    = f"=CEILING({PAX}/2,1)"      # 1 botella cada 2 pax
+AGUA_15 = f"=CEILING({PAX}/4,1)"      # 1 cada 4 pax
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def _sec(ws, row, text):
-    ws.merge_cells(f"A{row}:B{row}")
+    ws.merge_cells(f"A{row}:C{row}")
     c = ws[f"A{row}"]
     c.value, c.font, c.alignment = text, Font(name="Arial", bold=True, size=10, color="FFFFFF"), _al
     c.fill = PatternFill("solid", start_color="2E4057")
     ws.row_dimensions[row].height = 18
 
 def _hdr(ws, row):
-    for col, txt in [("A","Item"),("B","Cantidad")]:
+    for col, txt in [("A","Item"),("B","Cantidad"),("C","Observaciones")]:
         c = ws[f"{col}{row}"]
         c.value, c.font, c.alignment, c.border = txt, Font(name="Arial", bold=True, size=10, color="FFFFFF"), _ac, _bd
         c.fill = PatternFill("solid", start_color="4A7FB5")
@@ -53,6 +59,8 @@ def _lv(ws, row, label, value="", mode="auto"):
     ws[f"B{row}"].font  = _fa if mode == "auto" else _fi
     ws[f"B{row}"].fill  = _auto if mode == "auto" else _inp
     ws[f"B{row}"].alignment, ws[f"B{row}"].border = _al, _bd
+    ws[f"C{row}"].border = _bd
+    ws.merge_cells(f"B{row}:C{row}")   # los datos de la salida ocupan todo el ancho
     ws.row_dimensions[row].height = 16
 
 def _it(ws, row, label, val, mode="auto"):
@@ -64,6 +72,7 @@ def _it(ws, row, label, val, mode="auto"):
 
     ws[f"B{row}"] = val
     ws[f"B{row}"].alignment, ws[f"B{row}"].border = _ac, _bd
+    ws[f"C{row}"].border, ws[f"C{row}"].fill = _bd, _inp
 
     if mode == "input":
         ws[f"B{row}"].font, ws[f"B{row}"].fill = _fi, _inp
@@ -81,13 +90,52 @@ def _drinks(ws, start_row):
     _hdr(ws, start_row + 1)
     items = [
         ("Agua 600ml",       f"={PAX}"),
-        ("Agua 1.5L",        f"=INT({PAX}/2)"),
-        ("Cerveza",          f"={PAX}+1"),
-        ("Vinos (botellas)", f"=CEILING({PAX}/2,1)"),
+        ("Agua 1.5L",        AGUA_15),
+        ("Cerveza",          CERVEZA),
+        ("Vinos (botellas)", VINO),
     ]
     for i, (lbl, val) in enumerate(items):
         _it(ws, start_row + 2 + i, lbl, val)
     return start_row + 2 + len(items)
+
+# ── Extras opcionales para días fríos ─────────────────────────────────────────
+EXTRAS = {
+    'infusiones': ("SET INFUSIONES / CAFÉ", [
+        ("Caja de té",                   "1",          "auto"),
+        ("Tazas (1 por pax + guía)",     f"={PAX}+1",  "auto"),
+        ("Termo de agua caliente",       "1",          "input"),
+    ]),
+    'sopa': ("SOPA DE CALABAZA", [
+        ("Sopa de calabaza (porciones)", f"={PAX}",    "auto"),
+        ("Cuencos para sopa",            f"={PAX}",    "auto"),
+    ]),
+}
+EXTRAS_LABEL = {'infusiones': 'infusiones/café', 'sopa': 'sopa de calabaza'}
+
+
+def parse_extras(val) -> list:
+    if not val:
+        return []
+    if isinstance(val, (list, tuple, set)):
+        items = val
+    else:
+        items = str(val).split(',')
+    return [e.strip() for e in items if e.strip() in EXTRAS]
+
+
+def add_extras_sections(ws, start_row, extras) -> int:
+    """Agrega las secciones de extras desde start_row. Devuelve la próxima fila libre."""
+    row = start_row
+    for key in parse_extras(extras):
+        title, items = EXTRAS[key]
+        _sec(ws, row, f"  {title}"); row += 1
+        _hdr(ws, row);               row += 1
+        for lbl, val, mode in items:
+            _it(ws, row, lbl, val, mode=mode)
+            row += 1
+        _gap(ws, row); row += 1
+    return row
+
 
 def _cabecera(ws, params):
     fecha = params.get('date')
@@ -103,7 +151,7 @@ def _cabecera(ws, params):
     _lv(ws, 9,  "HOTEL:",             params.get('hotel') or '',    mode="input")
     _lv(ws, 10, "GUIA:",              params.get('guide') or '',    mode="input")
     _lv(ws, 11, "CONDUCTOR:",         '',                           mode="input")
-    _lv(ws, 12, "RESTRICCIONES:",     params.get('dietary_restrictions') or 'Ninguna', mode="auto")
+    _lv(ws, 12, "RESTRICCIONES:",     params.get('dietary_restrictions') or 'Ninguna', mode="input")
     ws["A6"].font = Font(name="Arial", bold=True, size=10, color="CC0000")
     ws["B6"].font = Font(name="Arial", bold=True, size=11, color="1A6B1A")
     ws["B6"].fill = _auto
@@ -115,7 +163,7 @@ def _cabecera(ws, params):
 # "optional" → value se ignora, muestra "consultar con guía"
 OPT = "consultar con guía"
 
-def _get_almuerzo_campestre_rows(mesa4_row, mesa2_row):
+def _get_almuerzo_campestre_rows(mesa4_row, mesa2_row, barco=False):
     """Items del almuerzo campestre. mesa4_row y mesa2_row son las filas de las mesas para referencia."""
     m4 = f"B{mesa4_row}"
     m2 = f"B{mesa2_row}"
@@ -138,8 +186,8 @@ def _get_almuerzo_campestre_rows(mesa4_row, mesa2_row):
         ("Servilletas rollo cocina",               "varios",                                          "auto"),
         ("Servilleteros",                          "1",                                               "auto"),
         ("Paneras tela",                           "1",                                               "auto"),
-        ("Individuales tela (solo Barco)",         "/",                                               "auto"),
-        ("Platos principal",                       f"={PAX}",                                         "auto"),
+        ("Individuales tela",                      f"={PAX}" if barco else "/",                      "auto"),
+        ("Platos cerámica (principal)" if barco else "Platos principal", f"={PAX}",                  "auto"),
         ("Platos ceramicos kawen (postre)",        f"=IF({PAX}<=4,1,IF({PAX}<=8,2,3))",              "auto"),
         ("Tablas de madera",                       f"=CEILING({PAX}/2,1)",                            "auto"),
         ("Ensaladera madera",                      "1",                                               "auto"),
@@ -229,33 +277,61 @@ TEMPLATES = {
     },
 
     'FD Trekking': {
-        'gastronomy_title': 'GASTRONOMIA — Box Lunch',
+        # Frey, Cerro Goye y Bella Vista comparten planilla. Solo agua.
+        'gastronomy_title': 'GASTRONOMIA — Box Lunch Trekking',
         'equipment': [
-            ("Bastones",  f"={PAX}",  "auto"),
-            ("Radios",    OPT,        "optional"),
+            ("Bastones",  "pedir si necesita", "input"),
+            ("Radios",    "/",                 "auto"),
+            ("Polainas",  "/",                 "auto"),
         ],
         'gastronomy': [
-            ("BLTREK",   f"={PAX}", "auto"),
-            ("Personal (guia + conductor — ajustar si hay backup)", "2", "input"),
+            ("BLTREK",       f"={PAX}", "auto"),
+            ("Personal",     "1",       "input"),
+            ("Aguas 600ml",  f"={PAX}", "auto"),
+            ("Agua 1.5L",    AGUA_15,   "auto"),
         ],
+        'no_drinks': True,
+        'gastronomy_type': 'BL',
+    },
+
+    'Bariloche Hiking': {
+        'gastronomy_title': 'GASTRONOMIA — Box Lunch',
+        'equipment': [
+            ("Bastones",  "/", "auto"),
+            ("Radios",    "/", "auto"),
+        ],
+        'gastronomy': [
+            ("Box lunch",           f"={PAX}", "auto"),
+            ("Box lunch personal",  "2",       "input"),
+            ("Aguas 600ml",         f"={PAX}", "auto"),
+            ("Agua 1.5L",           AGUA_15,   "auto"),
+        ],
+        'no_drinks': True,
         'gastronomy_type': 'BL',
     },
 
     'Montañas y Glaciares del Tronador': {
+        # Según planilla modelo (2 pax). Con más pax solo escalan box lunch y bebidas;
+        # vasos y sillitas también.
         'gastronomy_title': 'GASTRONOMIA — Box Lunch Gourmet',
         'equipment': [
-            ("Bastones",            OPT,       "optional"),
-            ("Radios",              OPT,       "optional"),
-            ("Vasos",               f"={PAX}", "auto"),
-            ("Sacacorchos",         "1",       "auto"),
-            ("Mesa",                OPT,       "optional"),
-            ("Mantel",              OPT,       "optional"),
-            ("Sillitas de camping", OPT,       "optional"),
+            ("Bastones",            "/",  "auto"),
+            ("Radios",              "/",  "auto"),
+            ("Vasos",               f"={PAX}",  "auto"),
+            ("Sacacorchos",         "1",  "auto"),
+            ("Mesa",                "1",  "auto"),
+            ("Mantel",              "1",  "auto"),
+            ("Sillitas de camping", f"={PAX}",  "auto"),
         ],
         'gastronomy': [
             ("BLgourmet",  f"={PAX}", "auto"),
-            ("Personal (guia + conductor — ajustar si hay backup)", "2", "input"),
+            ("Personal (guía + conductor)", "2", "input"),
+            ("Cerveza",    CERVEZA, "auto"),
+            ("Agua",       f"={PAX}",   "auto"),
+            ("Agua 1.5L",  "/",         "auto"),
+            ("Vino",       VINO, "auto"),
         ],
+        'no_drinks': True,   # las bebidas van dentro de GASTRONOMIA, como en la planilla modelo
         'gastronomy_type': 'BL',
     },
 
@@ -289,39 +365,36 @@ TEMPLATES = {
     },
 
     'Navegacion AC': {
-        'gastronomy_title': 'GASTRONOMIA — Almuerzo Campestre (Barco)',
+        # Navegación privada: mismo almuerzo campestre que el kayak FD (con mobiliario),
+        # + individuales de tela por pax y platos principales de cerámica.
+        'gastronomy_title': 'GASTRONOMIA — Almuerzo Campestre (Navegación privada)',
         'equipment': [
             ("Bastones",          OPT, "optional"),
             ("Radios",            OPT, "optional"),
             ("Ponchos de lluvia", OPT, "optional"),
         ],
-        'gastronomy': [
-            # Navegación AC: sin mesas (es en el barco), individuales = 1/pax
-            ("Copas grandes (vino)",               f"={PAX}",                           "auto"),
-            ("Copas chicas (agua)",                f"={PAX}",                           "auto"),
-            ("Tenedores",                          f"={PAX}",                           "auto"),
-            ("Cucharitas (postre / cafe)",         f"={PAX}",                           "auto"),
-            ("Cuchillos",                          f"={PAX}",                           "auto"),
-            ("Cuchara ensalada",                   "1 juego",                           "auto"),
-            ("Destapador",                         "1",                                 "auto"),
-            ("Cuencos ceramicos (dips)",           f"={PAX}",                           "auto"),
-            ("Cucharita madera / dips",            f"={PAX}",                           "auto"),
-            ("Servilletas / pax",                  "varios",                            "auto"),
-            ("Servilletas rollo cocina",           "varios",                            "auto"),
-            ("Servilleteros",                      "1",                                 "auto"),
-            ("Paneras tela",                       "1",                                 "auto"),
-            ("Individuales tela",                  f"={PAX}",                           "auto"),
-            ("Platos principal",                   f"={PAX}",                           "auto"),
-            ("Platos ceramicos kawen (postre)",    f"=CEILING({PAX}/2,1)",              "auto"),
-            ("Tablas de madera",                   f"=CEILING({PAX}/2,1)",              "auto"),
-            ("Ensaladera madera grande",           "1",                                 "auto"),
-            ("Broches mantel",                     "4",                                 "input"),
-            ("Manteles",                           "1",                                 "input"),
-            ("Caminos",                            "1",                                 "input"),
-            ("Alcohol gel",                        "1",                                 "auto"),
-            ("Bolsas de basura",                   "varios",                            "auto"),
-        ],
+        'gastronomy': None,   # almuerzo campestre dinámico
+        'barco': True,
         'gastronomy_type': 'AC',
+    },
+
+    'Valle Encantado Pollo': {
+        'gastronomy_title': 'CATERING — Pollo al disco Valle Encantado',
+        'default_site': 'Valle Encantado',
+        'equipment': [
+            ("Bastones",  "pedir de ser necesario", "input"),
+            ("Radios",    "/",                      "auto"),
+            ("Heladeras", "2",                      "auto"),
+        ],
+        'gastronomy': [
+            ("Pollo al disco", f"={PAX}", "auto"),
+            ("Flan",           f"={PAX}", "auto"),
+            ("Crema",          "/",       "input"),
+            ("Dulce de leche", "/",       "input"),
+            ("Pan",            "varios",  "auto"),
+            ("Café",           "1",       "auto"),
+        ],
+        'gastronomy_type': 'valle',
     },
 
     'Valle Asado': {
@@ -349,6 +422,36 @@ TEMPLATES = {
 }
 
 # Alias para parsear variantes del nombre
+# ── Variantes: mismo contenido, otro nombre / destino ─────────────────────────
+import copy as _copy
+
+def _variant(base, **changes):
+    t = _copy.deepcopy(TEMPLATES[base])
+    t.update(changes)
+    return t
+
+# Trucha: igual que pollo al disco, cambia solo el plato principal
+TEMPLATES['Valle Encantado Trucha'] = _variant(
+    'Valle Encantado Pollo',
+    gastronomy_title='CATERING — Trucha Valle Encantado',
+    gastronomy=[("Trucha", f"={PAX}", "auto")] + _copy.deepcopy(TEMPLATES['Valle Encantado Pollo']['gastronomy'][1:]),
+)
+# Misma gastronomía que Limay (box lunch gourmet)
+TEMPLATES['Lagos y Cascadas del Manso'] = _variant('Rios y Lagos del Limay', default_site='Cascada de los Alerces')
+TEMPLATES['San Martin de los Andes']   = _variant('Rios y Lagos del Limay', default_site='San Martín de los Andes')
+# Trekkings: misma planilla, cambia el destino
+TEMPLATES['FD Trekking Frey']             = _variant('FD Trekking', default_site='Base Cerro Catedral')
+TEMPLATES['FD Trekking Bella Vista / Goye'] = _variant('FD Trekking', default_site='Bella Vista / Cerro Goye')
+# Valle Asado: sitio por defecto
+TEMPLATES['Valle Asado'].setdefault('default_site', 'Valle Encantado')
+TEMPLATES['Montañas y Glaciares del Tronador'].setdefault('default_site', 'Tronador')
+
+
+def default_site(activity: str):
+    t = TEMPLATES.get(resolve_activity(activity or ''))
+    return t.get('default_site') if t else None
+
+
 ACTIVITY_ALIASES = {
     'fd kayak y trekking': 'FD Kayak',
     'fd kayak':            'FD Kayak',
@@ -370,13 +473,27 @@ ACTIVITY_ALIASES = {
     'barco':               'Navegacion Regular',
     'valle asado':         'Valle Asado',
     'asado':               'Valle Asado',
+    'valle encantado pollo': 'Valle Encantado Pollo',
+    'valle encantado trucha': 'Valle Encantado Trucha',
+    'trekking':            'FD Trekking',
+    'bariloche hiking':    'Bariloche Hiking',
+    'brc hiking':          'Bariloche Hiking',
+    'cascada de los alerces': 'Lagos y Cascadas del Manso',
+    'lagos y cascadas del manso': 'Lagos y Cascadas del Manso',
+    'san martin de los andes': 'San Martin de los Andes',
+    'frey':                'FD Trekking Frey',
+    'goye':                'FD Trekking Bella Vista / Goye',
+    'bella vista':         'FD Trekking Bella Vista / Goye',
 }
 
 
 def resolve_activity(raw: str) -> str:
     """Convierte el nombre parseado al nombre canónico del template."""
+    import unicodedata
     key = raw.lower().strip()
-    return ACTIVITY_ALIASES.get(key, raw)
+    key_sin_tildes = ''.join(c for c in unicodedata.normalize('NFD', key)
+                             if unicodedata.category(c) != 'Mn')
+    return ACTIVITY_ALIASES.get(key) or ACTIVITY_ALIASES.get(key_sin_tildes, raw)
 
 
 def generate(params: dict, output_dir: str = ".") -> str:
@@ -390,12 +507,14 @@ def generate(params: dict, output_dir: str = ".") -> str:
 
     wb = Workbook()
     ws = wb.active
-    ws.title = activity[:28]   # Excel limit on sheet name
+    ws.title = re.sub(r'[\\/*?:\[\]]', '-', activity)[:28]   # Excel no admite / \\ * ? : [ ] y máx. 31 caracteres
     ws.column_dimensions["A"].width = 42
     ws.column_dimensions["B"].width = 26
+    ws.column_dimensions["C"].width = 30
 
     # CABECERA
-    _cabecera(ws, {**params, 'activity': activity})
+    _cabecera(ws, {**params, 'activity': activity,
+                   'site': params.get('site') or tmpl.get('default_site')})
 
     # EQUIPAMIENTO
     equip = tmpl.get('equipment', [])
@@ -418,7 +537,7 @@ def generate(params: dict, output_dir: str = ".") -> str:
         # Almuerzo campestre kayak FD (con referencia a filas de mesas)
         mesa4_row = row  # B de esta fila = mesas de 4
         mesa2_row = row + 1
-        rows_data = _get_almuerzo_campestre_rows(mesa4_row, mesa2_row)
+        rows_data = _get_almuerzo_campestre_rows(mesa4_row, mesa2_row, barco=tmpl.get('barco', False))
         for lbl, val, mode in rows_data:
             _it(ws, row, lbl, val, mode=mode)
             row += 1
@@ -432,7 +551,11 @@ def generate(params: dict, output_dir: str = ".") -> str:
 
     # BEBIDAS (salvo HD Kayak que las integra en snacks)
     if not tmpl.get('no_drinks'):
-        _drinks(ws, row)
+        row = _drinks(ws, row)
+        _gap(ws, row); row += 1
+
+    # EXTRAS (infusiones / sopa), si se pidieron
+    add_extras_sections(ws, row, params.get('extras'))
 
     # Guardar
     act_slug  = activity.replace(' ', '_').replace('/', '-')

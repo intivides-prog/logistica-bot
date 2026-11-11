@@ -1,11 +1,17 @@
 """
 Base de datos SQLite para almacenar excursiones.
 """
+import os
 import sqlite3
 from datetime import date, datetime
 from typing import Optional
 
-DB_PATH = 'excursions.db'
+# En Railway, montar un volumen en /data y definir DB_PATH=/data/excursions.db
+# para que los datos sobrevivan a cada redeploy.
+DB_PATH = os.environ.get('DB_PATH', 'excursions.db')
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
 
 
 def get_conn():
@@ -39,6 +45,9 @@ def init_db():
         for col, definition in [
             ('cancelled', 'INTEGER DEFAULT 0'),
             ('calendar_event_id', 'TEXT'),
+            ('planilla_custom', 'TEXT'),
+            ('item_edits', 'TEXT'),
+            ('extras', 'TEXT'),
         ]:
             try:
                 conn.execute(f'ALTER TABLE excursions ADD COLUMN {col} {definition}')
@@ -57,8 +66,8 @@ def save_excursion(data: dict) -> int:
         cur = conn.execute('''
             INSERT INTO excursions
                 (date, activity, site, pax, guide, hotel, client,
-                 gastronomy_type, dietary_restrictions, hora, planilla_path, calendar_event_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                 gastronomy_type, dietary_restrictions, hora, planilla_path, calendar_event_id, extras)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (
             data.get('date').isoformat() if data.get('date') else None,
             data.get('activity'),
@@ -72,6 +81,7 @@ def save_excursion(data: dict) -> int:
             data.get('hora'),
             data.get('planilla_path'),
             data.get('calendar_event_id'),
+            ','.join(data.get('extras') or []) if isinstance(data.get('extras'), (list, tuple)) else data.get('extras'),
         ))
         return cur.lastrowid
 
@@ -79,7 +89,7 @@ def save_excursion(data: dict) -> int:
 def get_excursions_for_date(target_date: date) -> list:
     with get_conn() as conn:
         rows = conn.execute(
-            'SELECT * FROM excursions WHERE date = ? ORDER BY hora',
+            'SELECT * FROM excursions WHERE date = ? AND (cancelled IS NULL OR cancelled=0) ORDER BY hora',
             (target_date.isoformat(),)
         ).fetchall()
     return [dict(r) for r in rows]
@@ -111,7 +121,7 @@ def find_excursions(target_date: date, identifier: str = None, identifier_type: 
 
 def update_excursion(exc_id: int, field: str, value) -> bool:
     """Actualiza un campo de una excursión. Devuelve True si actualizó."""
-    allowed = {'hora', 'guide', 'date', 'dietary_restrictions', 'pax', 'site', 'hotel'}
+    allowed = {'hora', 'guide', 'date', 'dietary_restrictions', 'pax', 'site', 'hotel', 'client', 'extras'}
     if field not in allowed:
         return False
     val = value.isoformat() if hasattr(value, 'isoformat') else value
@@ -131,12 +141,9 @@ def append_restrictions(exc_id: int, new_restrictions: str) -> str:
 
 
 def cancel_excursion(exc_id: int) -> bool:
-    """Marca una excursión como cancelada."""
+    """Marca una excursión como cancelada (queda en la base como historial,
+    pero ya no aparece en consultas, avisos ni resúmenes)."""
     with get_conn() as conn:
-        try:
-            conn.execute('ALTER TABLE excursions ADD COLUMN cancelled INTEGER DEFAULT 0')
-        except Exception:
-            pass
         conn.execute('UPDATE excursions SET cancelled=1 WHERE id=?', (exc_id,))
     return True
 
@@ -155,3 +162,71 @@ def get_setting(key: str) -> Optional[str]:
             'SELECT value FROM settings WHERE key=?', (key,)
         ).fetchone()
     return row['value'] if row else None
+
+
+def get_upcoming(days: int = 14) -> list:
+    """Salidas activas desde hoy hasta dentro de `days` días."""
+    from datetime import timedelta
+    today = date.today()
+    with get_conn() as conn:
+        rows = conn.execute(
+            '''SELECT * FROM excursions WHERE date >= ? AND date <= ?
+               AND (cancelled IS NULL OR cancelled=0) ORDER BY date, hora''',
+            (today.isoformat(), (today + timedelta(days=days)).isoformat())
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _month_key(name: str) -> str:
+    return f"counter_{name}_{date.today().strftime('%Y-%m')}"
+
+
+def incr_counter(name: str):
+    key = _month_key(name)
+    save_setting(key, str(int(get_setting(key) or 0) + 1))
+
+
+def get_counter(name: str) -> int:
+    return int(get_setting(_month_key(name)) or 0)
+
+
+def get_excursion(exc_id: int):
+    with get_conn() as conn:
+        row = conn.execute('SELECT * FROM excursions WHERE id=?', (exc_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def set_custom_planilla(exc_id: int, path):
+    with get_conn() as conn:
+        conn.execute('UPDATE excursions SET planilla_custom=? WHERE id=?', (path, exc_id))
+
+
+def known_guides() -> list:
+    """Nombres de guías ya usados (para reconocer "con Rodri")."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT guide FROM excursions WHERE guide IS NOT NULL AND guide != ''"
+        ).fetchall()
+    return [r['guide'] for r in rows]
+
+
+def get_item_edits(exc_id: int) -> list:
+    import json
+    row = get_excursion(exc_id)
+    try:
+        return json.loads(row['item_edits']) if row and row.get('item_edits') else []
+    except ValueError:
+        return []
+
+
+def add_item_edit(exc_id: int, edit: dict):
+    """Guarda un cambio de ítem (se aplican en orden cada vez que se arma la planilla)."""
+    import json
+    edits = get_item_edits(exc_id) + [edit]
+    with get_conn() as conn:
+        conn.execute('UPDATE excursions SET item_edits=? WHERE id=?', (json.dumps(edits, ensure_ascii=False), exc_id))
+
+
+def clear_item_edits(exc_id: int):
+    with get_conn() as conn:
+        conn.execute('UPDATE excursions SET item_edits=NULL WHERE id=?', (exc_id,))

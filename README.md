@@ -67,8 +67,45 @@ Kayak mascardi 3 pax el 2 de abril, guía Julián Donatelli, una celíaca
 7. Se descarga un archivo JSON — ese es `google_credentials.json`
 8. En tu Google Calendar, compartí el calendario con el email de la cuenta de servicio
    (lo encontrás dentro del JSON, campo `client_email`), con permiso de **editar**
-9. En Railway, subí el archivo JSON como variable o como archivo en el proyecto
-10. Agregá la variable `GOOGLE_CALENDAR_ID=primary`
+9. En Railway, creá la variable `GOOGLE_CREDENTIALS_JSON` y pegá adentro **todo el contenido** del archivo JSON
+10. Agregá la variable `GOOGLE_CALENDAR_ID` con el ID de tu calendario (o `primary`)
+11. (Opcional, Drive) Agregá `GOOGLE_DRIVE_FOLDER_ID` con el ID de la carpeta donde guardar las planillas,
+    y compartí esa carpeta con el `client_email` con permiso de editor
+12. Probá con `/testcal` y `/testdrive` en el bot
+
+### Paso 6 — Que no se borren los datos (importante)
+
+Railway borra los archivos en cada redeploy, salvo que estén en un **volumen**.
+
+1. En Railway, abrí el servicio del bot → clic derecho (o menú ⋯) → **Attach Volume**
+2. Mount path: `/data`
+3. En Variables, agregá `DB_PATH=/data/excursions.db`
+4. Redeploy
+
+### Paso 7 — Activar la IA (opcional, recomendado)
+
+El bot entiende la mayoría de los pedidos con reglas propias (gratis). La IA solo se usa
+cuando el mensaje es raro o ambiguo (en las pruebas, ~1 de cada 10 mensajes).
+Sin la clave, el bot funciona igual: solo te va a pedir más aclaraciones.
+
+1. Entrá a [platform.claude.com](https://platform.claude.com) y creá una cuenta
+   (es distinta de tu cuenta de Claude; la facturación también es aparte)
+2. Cargá crédito en **Billing** (prepago; con el crédito mínimo te alcanza para mucho tiempo)
+3. Andá a **Settings → API keys** → **Create key**, ponele un nombre (ej: `bot-logistica`)
+4. **Copiá la clave** (empieza con `sk-ant-`). Se muestra una sola vez; si la perdés, creás otra
+5. En Railway → tu servicio → **Variables** → **New Variable**:
+   `ANTHROPIC_API_KEY` = la clave
+6. Railway redeploya solo. En **Logs** tiene que aparecer: `Interpretación con IA: activada`
+7. En Telegram, `/uso` muestra cuántos mensajes usaron IA en el mes y el costo estimado
+
+No compartas la clave ni la pegues en el código o en GitHub: va solo en las Variables de Railway.
+
+### Paso 8 — Usarlo entre varias personas
+
+1. Creá un grupo de Telegram con las personas del equipo y agregá el bot
+2. En @BotFather: `/mybots` → tu bot → **Bot Settings** → **Group Privacy** → **Turn off**
+   (si no, el bot no lee los mensajes normales del grupo)
+3. Mandá `/start` **en el grupo**: los avisos de las 11 y las 16 van a llegar ahí
 
 ---
 
@@ -80,6 +117,7 @@ Kayak mascardi 3 pax el 2 de abril, guía Julián Donatelli, una celíaca
 | `/proximas` | Lista las excursiones de los próximos 7 días |
 | `/gastro` | Muestra el resumen de gastronomía de mañana |
 | `/guias` | Muestra los mensajes para reenviar a los guías |
+| `/uso` | Mensajes interpretados por reglas vs IA en el mes |
 
 ---
 

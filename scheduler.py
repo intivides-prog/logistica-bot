@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 import pytz
 
 import db
+import generator
 
 TZ = pytz.timezone('America/Argentina/Buenos_Aires')
 
@@ -30,23 +31,30 @@ def build_gastro_summary(excursions: list) -> str:
     totals = {}
     for ex in excursions:
         gtype  = ex.get('gastronomy_type') or 'AC'
-        label  = GASTRO_LABELS.get(gtype, gtype)
+        tmpl   = generator.TEMPLATES.get(generator.resolve_activity(ex.get('activity') or ''))
+        if tmpl and tmpl.get('gastronomy_title'):
+            label = tmpl['gastronomy_title'].split('—')[-1].strip().title()
+        else:
+            label = GASTRO_LABELS.get(gtype, gtype)
         pax    = ex.get('pax') or '?'
         client = ex.get('client') or ex.get('guide') or '—'
         diet   = ex.get('dietary_restrictions')
 
         # Formato: "Ciardelli : AC x4 ( 1 vegetariano)"
         line = f"• *{client}* : {label} x{pax}"
+        extras = generator.parse_extras(ex.get('extras'))
+        if extras:
+            line += " + " + " + ".join(generator.EXTRAS_LABEL[e] for e in extras)
         if diet:
             line += f" ( {diet} )"
         lines.append(line)
 
-        totals[gtype] = totals.get(gtype, 0) + (pax if isinstance(pax, int) else 0)
+        totals[label] = totals.get(label, 0) + (pax if isinstance(pax, int) else 0)
 
     if len(totals) > 1 or sum(totals.values()) > 0:
         lines.append("")
-        for gtype, total in totals.items():
-            lines.append(f"_Total {GASTRO_LABELS.get(gtype, gtype)}: {total} pax_")
+        for label, total in totals.items():
+            lines.append(f"_Total {label}: {total} pax_")
 
     return '\n'.join(lines)
 
@@ -82,7 +90,17 @@ def build_guide_messages(excursions: list) -> list[str]:
     return messages
 
 
-async def job_gastro_summary(bot, chat_id: int):
+def _notify_chat_id():
+    """Chat donde van los avisos: el último donde se mandó /start."""
+    val = db.get_setting('chat_id')
+    return int(val) if val else None
+
+
+async def job_gastro_summary(bot):
+    chat_id = _notify_chat_id()
+    if not chat_id:
+        print("[Scheduler] Sin chat configurado: mandá /start al bot.")
+        return
     tomorrow = date.today() + timedelta(days=1)
     excursions = db.get_excursions_for_date(tomorrow)
     summary = build_gastro_summary(excursions)
@@ -95,7 +113,11 @@ async def job_gastro_summary(bot, chat_id: int):
         )
 
 
-async def job_guide_messages(bot, chat_id: int):
+async def job_guide_messages(bot):
+    chat_id = _notify_chat_id()
+    if not chat_id:
+        print("[Scheduler] Sin chat configurado: mandá /start al bot.")
+        return
     tomorrow = date.today() + timedelta(days=1)
     excursions = db.get_excursions_for_date(tomorrow)
     messages = build_guide_messages(excursions)
@@ -109,20 +131,21 @@ async def job_guide_messages(bot, chat_id: int):
         )
 
 
-def setup_scheduler(bot, chat_id: int) -> AsyncIOScheduler:
+def setup_scheduler(bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=TZ)
 
     scheduler.add_job(
-        lambda: asyncio.ensure_future(job_gastro_summary(bot, chat_id)),
+        lambda: asyncio.ensure_future(job_gastro_summary(bot)),
         CronTrigger(hour=11, minute=0, timezone=TZ),
         id='gastro_summary',
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: asyncio.ensure_future(job_guide_messages(bot, chat_id)),
+        lambda: asyncio.ensure_future(job_guide_messages(bot)),
         CronTrigger(hour=16, minute=0, timezone=TZ),
         id='guide_messages',
         replace_existing=True,
     )
 
-    scheduler
+    scheduler.start()
+    return scheduler

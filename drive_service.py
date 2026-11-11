@@ -4,7 +4,7 @@ Requiere: GOOGLE_CREDENTIALS_JSON y GOOGLE_DRIVE_FOLDER_ID
 """
 import os
 import json
- 
+
 try:
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
@@ -12,14 +12,14 @@ try:
     GOOGLE_AVAILABLE = True
 except ImportError:
     GOOGLE_AVAILABLE = False
- 
+
 SCOPES = [
     'https://www.googleapis.com/auth/calendar',
     'https://www.googleapis.com/auth/drive',
 ]
 FOLDER_ID = os.environ.get('GOOGLE_DRIVE_FOLDER_ID')
- 
- 
+
+
 def _get_service():
     if not GOOGLE_AVAILABLE:
         raise RuntimeError("google-api-python-client no instalado")
@@ -31,8 +31,8 @@ def _get_service():
         creds_info, scopes=SCOPES
     )
     return build('drive', 'v3', credentials=creds)
- 
- 
+
+
 def upload_file(filepath: str, filename: str) -> str | None:
     """
     Sube un archivo a Google Drive.
@@ -42,7 +42,7 @@ def upload_file(filepath: str, filename: str) -> str | None:
         return None
     if not os.environ.get('GOOGLE_CREDENTIALS_JSON'):
         return None
- 
+
     try:
         service = _get_service()
         file_metadata = {

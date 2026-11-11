@@ -41,6 +41,20 @@ ACTIVITY_SHORT = {
     'MTB':                 'MTB',
     'Trekking':            'Trekking',
     'Navegación':          'Naveg',
+    'HD Kayak':            'Kayak',
+    'Montañas y Glaciares del Tronador': 'Tronador',
+    'Rios y Lagos del Limay':            'Limay',
+    'Navegacion Regular':  'Naveg',
+    'Navegacion AC':       'Naveg AC',
+    'Valle Asado':         'Valle Asado',
+    'Valle Encantado Pollo':  'Valle Pollo',
+    'Valle Encantado Trucha': 'Valle Trucha',
+    'FD Trekking':         'Trekking',
+    'FD Trekking Frey':    'Trekking Frey',
+    'FD Trekking Bella Vista / Goye': 'Trekking Goye',
+    'Bariloche Hiking':    'BRC Hiking',
+    'Lagos y Cascadas del Manso': 'Cascadas Manso',
+    'San Martin de los Andes':    'SMA',
 }
 
 
@@ -89,11 +103,11 @@ def add_excursion(params: dict) -> str | None:
     Devuelve el link del evento o None si falla.
     """
     if not os.environ.get('GOOGLE_CREDENTIALS_JSON'):
-        return None   # Calendar no configurado — silencioso
+        return None, None   # Calendar no configurado — silencioso
 
     excursion_date = params.get('date')
     if not isinstance(excursion_date, date):
-        return None
+        return None, None
 
     activity = params.get('activity', 'Excursión')
     site     = params.get('site', '')
@@ -188,4 +202,18 @@ def update_excursion(event_id: str, params: dict) -> bool:
         return True
     except Exception as e:
         print(f"[Calendar] Error al actualizar: {e}")
+        return False
+
+
+
+def delete_excursion(event_id: str) -> bool:
+    """Borra un evento de Google Calendar (usado al cancelar una salida)."""
+    if not event_id or not os.environ.get('GOOGLE_CREDENTIALS_JSON'):
+        return False
+    try:
+        service = _get_service()
+        service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
+        return True
+    except Exception as e:
+        print(f"[Calendar] Error al borrar: {e}")
         return False

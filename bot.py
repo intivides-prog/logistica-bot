@@ -19,6 +19,8 @@ import generator
 import scheduler as sched_module
 import calendar_service
 import drive_service
+import ai_parser
+import planillas
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -29,7 +31,7 @@ logger = logging.getLogger(__name__)
 TOKEN       = os.environ['TELEGRAM_TOKEN']
 OWNER_ID    = int(os.environ.get('TELEGRAM_OWNER_ID', '0'))  # tu chat_id
 
-# Planillas pendientes de confirmación: chat_id -> parsed dict
+# Planillas pendientes de confirmación: (chat_id, user_id) -> parsed dict
 PENDING_PLANILLAS: dict = {}
 
 
@@ -48,7 +50,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Comandos disponibles:\n"
         "/proximas — ver próximas excursiones\n"
         "/gastro — resumen de gastronomía de mañana\n"
-        "/guias — mensaje para guías de mañana",
+        "/guias — mensaje para guías de mañana\n"
+        "/uso — cuántos mensajes usaron IA este mes\n\n"
+        "🔔 Los avisos diarios (11 hs y 16 hs) van a llegar a este chat.",
         parse_mode='Markdown'
     )
 
@@ -174,32 +178,80 @@ async def handle_update_request(update: Update, upd: dict):
 
     # ── Helper: regenera planilla con datos actualizados ─────────────────────
     async def _regenerate_planilla():
-        try:
-            from datetime import date as _date
-            exc_date = _date.fromisoformat(exc['date']) if isinstance(exc['date'], str) else exc['date']
-            rows = db.find_excursions(exc_date)
-            row = next((e for e in rows if e['id'] == exc_id), None)
-            if not row:
+        await _send_planilla(update, exc_id, "📋 Planilla actualizada")
+
+    if action == 'edit_item':
+        nv = new_value or {}
+        if not nv.get('item'):
+            await update.message.reply_text(
+                "No entendí qué ítem cambiar. Ej: _\"poné 4 vinos en el tronador de Rodri\"_",
+                parse_mode='Markdown')
+            return
+        edit = {'op': nv.get('op', 'set'), 'item': nv['item'], 'qty': nv.get('qty')}
+        # Simulación: aplica el cambio sobre la planilla actual para ver qué pasa
+        from openpyxl import load_workbook as _lw
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path, _ = planillas.build_file(db.get_excursion(exc_id), tmpdir)
+            report = planillas.apply_item_edits(_lw(path).worksheets[0], [edit])
+        msg = report[0] if report else 'Cambio guardado'
+        if msg.startswith('No encontré'):
+            await update.message.reply_text(f"⚠️ {msg} de {exc['activity']} ({fecha_str}). No cambié nada.")
+            return
+        db.add_item_edit(exc_id, edit)
+        await update.message.reply_text(
+            f"✅ {msg}\n{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})")
+        await _regenerate_planilla()
+        return
+
+    if action in ('add_extra', 'remove_extra'):
+        current = generator.parse_extras(exc.get('extras'))
+        asked = generator.parse_extras(new_value)
+        if action == 'add_extra':
+            nuevos = current + [e for e in asked if e not in current]
+            verbo = 'Agregué'
+        else:
+            if not any(e in current for e in asked):
+                # No tenía ese extra: quizás es un ítem suelto (ej. el café del Valle)
+                item = msg_parser.parse_item_edit(update.message.text or '')
+                if item and item['op'] == 'remove':
+                    await handle_update_request(update, {**upd, 'action': 'edit_item',
+                                                         'new_value': {k: v for k, v in item.items() if k != 'rest'}})
+                    return
+                await update.message.reply_text("Esa salida no tenía ese extra. No cambié nada.")
                 return
-            row_date = _date.fromisoformat(row['date']) if isinstance(row['date'], str) else row['date']
-            params = {**row, 'date': row_date}
-            with tempfile.TemporaryDirectory() as tmpdir:
-                filepath = generator.generate(params, output_dir=tmpdir)
-                filename = os.path.basename(filepath)
-                with open(filepath, 'rb') as f:
-                    await update.message.reply_document(
-                        document=f,
-                        filename=filename,
-                        caption="📋 Planilla actualizada"
-                    )
-        except Exception as e:
-            logger.error(f"[Planilla] Error regenerando: {e}")
+            nuevos = [e for e in current if e not in asked]
+            verbo = 'Saqué'
+        db.update_excursion(exc_id, 'extras', ','.join(nuevos) or None)
+        nombres = ' y '.join(generator.EXTRAS_LABEL[e] for e in asked)
+        await update.message.reply_text(
+            f"✅ {verbo} {nombres}\n{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})")
+        await _regenerate_planilla()
+        return
+
+    if action == 'set_restrictions':
+        db.update_excursion(exc_id, 'dietary_restrictions', new_value)
+        await _sync_calendar('dietary_restrictions', new_value)
+        await update.message.reply_text(
+            f"✅ Restricciones: *{new_value}*\n{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
+            parse_mode='Markdown')
+        await _regenerate_planilla()
+        return
+
+    if action == 'reset_planilla':
+        planillas.drop_custom(exc_id)
+        db.clear_item_edits(exc_id)
+        await _send_planilla(update, exc_id, "🔄 Volví a la planilla automática")
+        return
 
     if action == 'cancel':
         db.cancel_excursion(exc_id)
+        cal_msg = ''
+        if exc.get('calendar_event_id'):
+            ok = calendar_service.delete_excursion(exc['calendar_event_id'])
+            cal_msg = "\n📆 Evento borrado del Calendar." if ok else "\n⚠️ No pude borrar el evento del Calendar, borralo a mano."
         await update.message.reply_text(
             f"✅ Salida cancelada: {exc['activity']} — {fecha_str} "
-            f"(Guía: {exc['guide'] or '—'})"
+            f"(Guía: {exc['guide'] or '—'}){cal_msg}"
         )
 
     elif action == 'update_hora':
@@ -284,6 +336,7 @@ async def handle_update_request(update: Update, upd: dict):
             await update.message.reply_text("No entendí las restricciones. Ejemplo: _\"agrega 1 celíaco\"_", parse_mode='Markdown')
             return
         combined = db.append_restrictions(exc_id, new_value)
+        await _sync_calendar('dietary_restrictions', combined)
         await update.message.reply_text(
             f"✅ Restricciones actualizadas: *{combined}*\n"
             f"{exc['activity']} — {fecha_str} (Guía: {exc['guide'] or '—'})",
@@ -292,37 +345,71 @@ async def handle_update_request(update: Update, upd: dict):
         await _regenerate_planilla()
 
     elif action == 'resend_planilla':
-        # Reenvío directo — regenera y manda la planilla actual de la excursión
+        row = db.get_excursion(exc_id)
+        await _send_planilla(
+            update, exc_id,
+            f"📋 {row['activity']} — {fecha_str}\n"
+            f"Guía: {row['guide'] or '—'} | Pax: {row['pax']} | Hora: {row['hora'] or '09:00 hs'}"
+        )
+
+
+async def _send_planilla(update: Update, exc_id: int, caption: str):
+    """Manda la planilla de una salida (la editada a mano si existe)."""
+    try:
+        row = db.get_excursion(exc_id)
+        if not row:
+            await update.message.reply_text("No encontré los datos de esa excursión.")
+            return
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath, editada = planillas.build_file(row, tmpdir)
+            if editada:
+                caption += "\n✏️ Versión editada a mano (actualicé solo la cabecera)"
+            with open(filepath, 'rb') as f:
+                await update.message.reply_document(
+                    document=f, filename=os.path.basename(filepath), caption=caption)
+    except Exception as e:
+        logger.error(f"[Planilla] Error enviando: {e}")
+        await update.message.reply_text("No pude armar la planilla. Intentá de nuevo.")
+
+
+async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Recibe una planilla editada a mano (.xlsx) y la asocia a su salida."""
+    doc = update.message.document
+    if not doc or not (doc.file_name or '').lower().endswith('.xlsx'):
+        return
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, 'subida.xlsx')
+        tg_file = await doc.get_file()
+        await tg_file.download_to_drive(path)
         try:
-            from datetime import date as _date
-            exc_date = _date.fromisoformat(exc['date']) if isinstance(exc['date'], str) else exc['date']
-            rows = db.find_excursions(exc_date)
-            row = next((e for e in rows if e['id'] == exc_id), None)
-            if not row:
-                await update.message.reply_text("No encontré los datos de esa excursión.")
-                return
-            row_date = _date.fromisoformat(row['date']) if isinstance(row['date'], str) else row['date']
-            params = {**row, 'date': row_date}
-            with tempfile.TemporaryDirectory() as tmpdir:
-                filepath = generator.generate(params, output_dir=tmpdir)
-                filename = os.path.basename(filepath)
-                with open(filepath, 'rb') as f:
-                    await update.message.reply_document(
-                        document=f,
-                        filename=filename,
-                        caption=(
-                            f"📋 {row['activity']} — {exc_date.strftime('%d/%m/%Y')}\n"
-                            f"Guía: {row['guide'] or '—'} | Pax: {row['pax']} | Hora: {row['hora'] or '09:00 hs'}"
-                        )
-                    )
+            header = planillas.read_header(path)
         except Exception as e:
-            logger.error(f"[Resend] Error: {e}")
-            await update.message.reply_text("No pude regenerar la planilla. Intentá de nuevo.")
+            logger.error(f"[Planilla] No pude leer el Excel: {e}")
+            await update.message.reply_text("No pude leer ese Excel. ¿Es una planilla generada por el bot?")
+            return
+        exc, cands = planillas.match_excursion(header)
+        if not exc:
+            if not header.get('date'):
+                msg = "No encontré la fecha en la planilla (celda B4). No la borres al editar."
+            elif not cands:
+                msg = f"No hay salidas registradas el {header['date'].strftime('%d/%m/%Y')}."
+            else:
+                msg = ("Hay varias salidas ese día y no pude saber cuál es. "
+                       "Revisá que el guía (celda B10) coincida con el registrado.")
+            await update.message.reply_text(msg)
+            return
+        planillas.save_custom(exc['id'], path)
+    await update.message.reply_text(
+        f"✅ Guardé tu planilla editada para *{exc['activity']}* del "
+        f"{date.fromisoformat(exc['date']).strftime('%d/%m/%Y')} (guía {exc['guide'] or '—'}).\n"
+        f"Desde ahora reenvío esta versión, y si cambia la hora, pax o guía, actualizo solo la cabecera.\n"
+        f"Para volver a la planilla automática: _\"volvé a la planilla original de Lark el 20/6\"_",
+        parse_mode='Markdown'
+    )
 
 
 async def _generate_and_send(update: Update, parsed: dict):
     """Genera la planilla y la envía. Usado tanto en creación como en confirmación."""
-    db.save_setting('chat_id', str(update.effective_chat.id))
     await update.message.reply_text("⏳ Generando planilla...")
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -392,68 +479,19 @@ async def handle_date_query(update: Update, query_date: date):
         pax = ex.get('pax') or '?'
         restr = f"\n   ⚠️ {ex['dietary_restrictions']}" if ex.get('dietary_restrictions') else ''
         lines.append(
-            f"• *{ex['activity']}* {ex.get('site','')}\n"
+            f"• *{ex['activity']}* {ex.get('site') or ''}\n"
             f"   🕐 {hora} | 👥 {pax} pax | 👤 {guide}{hotel}{restr}"
         )
 
     await update.message.reply_text('\n'.join(lines), parse_mode='Markdown')
 
 
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ''
-    t = text.lower().strip()
-    chat_id = update.effective_chat.id
-
-    # ── Confirmación de planilla pendiente ────────────────────────────────────
-    if re.search(r'^s[ií]$|^dale$|^ok$|^generar?$|^confirm[ao]$|^anda$|^va$', t):
-        pending = PENDING_PLANILLAS.pop(chat_id, None)
-        if pending:
-            await _generate_and_send(update, pending)
-            return
-    if re.search(r'^no$|^cancel[ao]$|^nop[eo]?$', t):
-        if PENDING_PLANILLAS.pop(chat_id, None):
-            await update.message.reply_text("Cancelado. Podés mandarme el pedido de nuevo cuando quieras.")
-            return
-
-    # ── Consulta de fecha en lenguaje natural ─────────────────────────────────
-    query_date = msg_parser.parse_date_query(text)
-    if query_date:
-        await handle_date_query(update, query_date)
-        return
-
-    # ── Actualización de excursión existente ──────────────────────────────────
-    upd = msg_parser.parse_update(text)
-    if upd:
-        await handle_update_request(update, upd)
-        return
-
-    # ── Pedido de planilla nueva ───────────────────────────────────────────────
-    keywords = ['plani', 'planilla', 'kayak', 'mtb', 'trekking', 'naveg']
-    if not any(k in t for k in keywords):
-        await update.message.reply_text(
-            "No entendí el pedido. Intentá con algo como:\n"
-            "_\"Kayak mascardi 4 pax 14/4 guía Julián\"_",
-            parse_mode='Markdown'
-        )
-        return
-
-    parsed = msg_parser.parse_message(text)
-    missing = msg_parser.format_missing(parsed)
-
-    if missing:
-        await update.message.reply_text(
-            "Casi! Faltaría:\n• " + '\n• '.join(missing) +
-            "\n\nAgregá esos datos y lo genero al toque.",
-            parse_mode='Markdown'
-        )
-        return
-
-    # Confirmación antes de generar
+def _resumen_borrador(parsed: dict) -> str:
     fecha_str = parsed['date'].strftime('%d/%m/%Y') if parsed.get('date') else '—'
     resumen = (
         f"Entendí esto:\n"
-        f"• *{parsed['activity']}* — {parsed.get('site') or '(sitio no especificado)'}\n"
-        f"• Fecha: {fecha_str}  |  Pax: {parsed['pax']}\n"
+        f"• *{parsed.get('activity') or '(actividad?)'}* — {parsed.get('site') or '(sitio no especificado)'}\n"
+        f"• Fecha: {fecha_str}  |  Pax: {parsed.get('pax') or '?'}\n"
         f"• Guía: {parsed.get('guide') or '(no especificado)'}"
     )
     if parsed.get('client'):
@@ -464,10 +502,186 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         resumen += f"\n• Hora: {parsed['hora']}"
     if parsed.get('dietary_restrictions'):
         resumen += f"\n• Restricciones: {parsed['dietary_restrictions']}"
-    resumen += "\n\n¿Genero la planilla? _(sí / no)_"
+    extras = generator.parse_extras(parsed.get('extras'))
+    if extras:
+        resumen += "\n• Extras: " + ', '.join(generator.EXTRAS_LABEL[e] for e in extras)
+    return resumen
 
-    PENDING_PLANILLAS[chat_id] = parsed
-    await update.message.reply_text(resumen, parse_mode='Markdown')
+
+async def _handle_create(update: Update, key, parsed: dict):
+    """Muestra el borrador: pide lo que falta o pide confirmación."""
+    if parsed.get('activity') and not parsed.get('site'):
+        parsed = {**parsed, 'site': generator.default_site(parsed['activity'])}
+    missing = msg_parser.format_missing(parsed)
+    PENDING_PLANILLAS[key] = {**parsed, '_complete': not missing}
+    if missing:
+        extra = ("\n\nRespondé solo con lo que falta (ej: _\"6 pax\"_) y lo completo."
+                 if ai_parser.available() else
+                 "\n\nMandame el pedido completo de nuevo con esos datos.")
+        await update.message.reply_text(
+            _resumen_borrador(parsed) + "\n\nFaltaría:\n• " + '\n• '.join(missing) + extra,
+            parse_mode='Markdown'
+        )
+        return
+    await update.message.reply_text(
+        _resumen_borrador(parsed) + "\n\n¿Genero la planilla? _(sí / no, o decime qué corregir)_",
+        parse_mode='Markdown'
+    )
+
+
+def _resolve_without_date(upd: dict) -> dict:
+    """Si una modificación no dice la fecha pero sí el guía/reserva, busca en las próximas salidas."""
+    if upd.get('date') or not upd.get('identifier'):
+        return upd
+    ident = upd['identifier'].lower()
+    hits = [e for e in db.get_upcoming(days=90)
+            if ident in (e.get('guide') or '').lower() or ident in (e.get('client') or '').lower()]
+    if len(hits) == 1:
+        upd = {**upd, 'date': date.fromisoformat(hits[0]['date'])}
+    return upd
+
+
+def _fill_known_guide(parsed: dict, text: str) -> dict:
+    """Si no se detectó guía pero el texto nombra a uno ya conocido ("con rodri"), lo completa."""
+    if parsed.get('guide'):
+        return parsed
+    for g in db.known_guides():
+        first = g.split()[0]
+        if len(first) >= 3 and re.search(rf'\b{re.escape(first.lower())}\b', text.lower()):
+            return {**parsed, 'guide': g}
+    return parsed
+
+
+GREETING = re.compile(r'^(hola|buenas|buen[oa]s?\s+(d[ií]as?|tardes?|noches?)|gracias|genial|joya|perfecto|ok gracias|ayuda|help)\b[\s!.,?¿¡a-záéíóúñ]*$', re.I)
+
+
+async def _via_ai(update: Update, key, text: str) -> bool:
+    """Le pasa el mensaje a la IA. Devuelve True si lo resolvió."""
+    if not ai_parser.available():
+        return False
+    pending = PENDING_PLANILLAS.get(key)
+    pending_clean = {k: v for k, v in pending.items() if k != '_complete'} if pending else None
+    result = ai_parser.interpret(text, upcoming=db.get_upcoming(), pending=pending_clean)
+    if not result:
+        return False
+    db.incr_counter('ia')
+    intent = result['intent']
+    if intent == 'create':
+        await _handle_create(update, key, result['data'])
+    elif intent == 'query':
+        await handle_date_query(update, result['date'])
+    elif intent == 'update':
+        await handle_update_request(update, result['data'])
+    else:
+        await update.message.reply_text(
+            result.get('reply') or
+            "No entendí el pedido. Probá con algo como:\n_\"Kayak mascardi 4 pax 14/4 guía Julián\"_",
+            parse_mode='Markdown'
+        )
+    return True
+
+
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Modelo mixto: primero reglas (gratis, instantáneo). Solo si las reglas
+    no están seguras, el mensaje pasa a la IA. Sin IA configurada, las reglas
+    hacen todo lo que pueden y piden aclaración.
+    """
+    text = update.message.text or ''
+    t = text.lower().strip()
+    key = (update.effective_chat.id, update.effective_user.id if update.effective_user else 0)
+    pending = PENDING_PLANILLAS.get(key)
+
+    # 1. Confirmación / cancelación del borrador ───────────────────────────────
+    if re.search(r'^s[ií]!*$|^dale$|^ok$|^generar?(la)?$|^confirm[ao]$|^anda$|^va$|^de una$', t):
+        if pending and pending.get('_complete'):
+            PENDING_PLANILLAS.pop(key, None)
+            await _generate_and_send(update, {k: v for k, v in pending.items() if k != '_complete'})
+            return
+    if re.search(r'^no$|^cancel[ao]$|^nop[eo]?$|^dej[aá]$', t):
+        if PENDING_PLANILLAS.pop(key, None):
+            await update.message.reply_text("Cancelado. Podés mandarme el pedido de nuevo cuando quieras.")
+            return
+
+    # 2. Completar / corregir el borrador pendiente ────────────────────────────
+    if pending:
+        clean = {k: v for k, v in pending.items() if k != '_complete'}
+        merged = msg_parser.merge_followup(text, clean)
+        if not merged and not clean.get('guide') and len(text.split()) <= 3:
+            filled = _fill_known_guide(clean, text)
+            merged = filled if filled is not clean else None
+        if merged:
+            db.incr_counter('reglas')
+            await _handle_create(update, key, merged)
+            return
+
+    # 3. Consulta de fecha ("qué hay el viernes") ──────────────────────────────
+    query_date = msg_parser.parse_date_query(text)
+    if query_date:
+        db.incr_counter('reglas')
+        await handle_date_query(update, query_date)
+        return
+
+    # 4. Modificación de una salida existente ──────────────────────────────────
+    upd = msg_parser.parse_update(text)
+    if upd:
+        upd = _resolve_without_date(upd)
+        if msg_parser.update_is_complete(upd):
+            db.incr_counter('reglas')
+            await handle_update_request(update, upd)
+            return
+        if await _via_ai(update, key, text):
+            return
+        if upd.get('date'):
+            await handle_update_request(update, upd)   # pide el dato que falta
+        else:
+            await update.message.reply_text(
+                "¿De qué salida? Decime la fecha y el guía (ej: _\"del 20/6 guía Lark\"_).",
+                parse_mode='Markdown')
+        return
+
+    # 5. Pedido de planilla nueva ──────────────────────────────────────────────
+    if msg_parser.mentions_activity(text):
+        parsed = _fill_known_guide(msg_parser.parse_message(text), text)
+        if not msg_parser.format_missing(parsed):
+            db.incr_counter('reglas')
+            await _handle_create(update, key, parsed)   # siempre pide confirmación
+            return
+        db.incr_counter('reglas')
+        await _handle_create(update, key, parsed)       # pide lo que falta (sin gastar IA)
+        return
+
+    # 6. Saludos / ayuda: respuesta fija, sin IA ───────────────────────────────
+    if len(t) < 40 and GREETING.match(t):
+        await update.message.reply_text(
+            "👋 Mandame una salida y te armo la planilla, ej:\n"
+            "_\"Kayak mascardi 4 pax 20/6 guía Lark\"_\n"
+            "O preguntame _\"qué hay mañana\"_.",
+            parse_mode='Markdown')
+        return
+
+    # 7. Nada claro: IA, o mensaje de ayuda ────────────────────────────────────
+    if await _via_ai(update, key, text):
+        return
+    await update.message.reply_text(
+        "No entendí el pedido. Intentá con algo como:\n"
+        "_\"Kayak mascardi 4 pax 14/4 guía Julián\"_",
+        parse_mode='Markdown'
+    )
+
+
+async def cmd_uso(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    reglas = db.get_counter('reglas')
+    ia = db.get_counter('ia')
+    total = reglas + ia
+    pct = f" ({ia * 100 // total}% con IA)" if total else ''
+    costo = ia * 0.0003
+    await update.message.reply_text(
+        f"📊 Mensajes interpretados este mes: {total}{pct}\n"
+        f"• Por reglas (gratis): {reglas}\n"
+        f"• Por IA: {ia} — costo estimado ≈ US$ {costo:.2f}\n"
+        f"IA {'activada' if ai_parser.available() else 'desactivada'}."
+    )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -481,21 +695,23 @@ def main():
     app.add_handler(CommandHandler("proximas", cmd_proximas))
     app.add_handler(CommandHandler("gastro",   cmd_gastro))
     app.add_handler(CommandHandler("guias",    cmd_guias))
+    app.add_handler(CommandHandler("uso",       cmd_uso))
     app.add_handler(CommandHandler("testcal",   cmd_testcal))
     app.add_handler(CommandHandler("testdrive", cmd_testdrive))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     # Iniciar scheduler después de que el event loop esté corriendo
     async def post_init(app):
-        chat_id_str = db.get_setting('chat_id')
-        if chat_id_str:
-            sched_module.setup_scheduler(app.bot, int(chat_id_str))
-        else:
+        # El scheduler arranca siempre; el chat de destino se lee en cada aviso,
+        # así que funciona aunque /start se mande después de iniciar el bot.
+        sched_module.setup_scheduler(app.bot)
+        if not db.get_setting('chat_id'):
             logger.warning("chat_id no configurado aún. Enviá /start al bot para activar los recordatorios.")
 
     app.post_init = post_init
 
-    logger.info("Bot iniciado.")
+    logger.info(f"Bot iniciado. Interpretación con IA: {'activada' if ai_parser.available() else 'desactivada (falta ANTHROPIC_API_KEY)'}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

@@ -19,6 +19,8 @@ SITES = {
     'colonia suiza':'Colonia Suiza',
     'traful':       'Lago Traful',
     'espejo':       'Lago Espejo',
+    'villa la angostura': 'Villa La Angostura',
+    'vla':          'Villa La Angostura',
 }
 
 MONTHS_ES = {
@@ -162,71 +164,235 @@ DIET_PATTERNS = [
 ]
 
 
+# ══ Detectores reutilizables (reglas) ════════════════════════════════════════
+
+def _sin_tildes(text: str) -> str:
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFD', text.lower())
+                   if unicodedata.category(c) != 'Mn')
+
+
+# Orden importa: lo más específico primero.
+# (condición sobre el texto sin tildes, nombre de la actividad)
+ACTIVITY_RULES = [
+    (r'\b(hd|half\s*day|medio\s*dia)\b.*\bkayak|\bkayak\b.*\b(hd|half\s*day|medio\s*dia)\b', 'HD Kayak'),
+    (r'\bkayak\b.*\btrek|\btrek.*\bkayak\b',                       'FD Kayak y Trekking'),
+    (r'\bkayak',                                                    'FD Kayak'),
+    (r'tronador|glaciares',                                         'Montañas y Glaciares del Tronador'),
+    (r'limay|rios\s+y\s+lagos',                                     'Rios y Lagos del Limay'),
+    (r'cascada|alerces|\bmanso\b',                                  'Lagos y Cascadas del Manso'),
+    (r'san\s+martin|\bsma\b',                                       'San Martin de los Andes'),
+    (r'\btrucha',                                                   'Valle Encantado Trucha'),
+    (r'\bpollo|\bdisco\b',                                          'Valle Encantado Pollo'),
+    (r'\basado\b',                                                  'Valle Asado'),
+    (r'hiking|\bbrc\b',                                             'Bariloche Hiking'),
+    (r'\bfrey\b',                                                   'FD Trekking Frey'),
+    (r'goye|bella\s+vista',                                         'FD Trekking Bella Vista / Goye'),
+    (r'(naveg|barco|lancha).*\b(ac|almuerzo|pvt|privad[ao])\b|\b(ac|almuerzo|pvt|privad[ao])\b.*(naveg|barco|lancha)',
+                                                                    'Navegacion AC'),
+    (r'naveg|barco|lancha',                                         'Navegacion Regular'),
+    (r'\bmtb\b|mountain\s*bike|\bbici',                             'MTB'),
+    (r'\btrek',                                                     'FD Trekking'),
+]
+ACTIVITY_WORDS = (r'kayak|tronador|glaciares|limay|rios\s+y\s+lagos|valle\s+encantado|\basado\b|naveg|barco|lancha|'
+                  r'\bmtb\b|mountain\s*bike|\bbici|\btrek|plani|cascada|alerces|\bmanso\b|san\s+martin|\bsma\b|'
+                  r'trucha|\bpollo|hiking|\bbrc\b|\bfrey\b|goye|bella\s+vista|\bvalle\b')
+
+# "Valle Encantado" solo, sin decir qué comida: hay que preguntar
+VALLE_AMBIGUO = r'valle\s+encantado|\bvalle\b'
+
+
+def detect_activity(text: str):
+    t = _sin_tildes(text)
+    for pattern, name in ACTIVITY_RULES:
+        if re.search(pattern, t):
+            return name
+    return None
+
+
+def mentions_activity(text: str) -> bool:
+    return bool(re.search(ACTIVITY_WORDS, _sin_tildes(text)))
+
+
+def detect_site(text: str):
+    t = _sin_tildes(text)
+    for key, val in SITES.items():
+        if key in t:
+            return val
+    return None
+
+
+def detect_pax(text: str):
+    t = _sin_tildes(text)
+    for pat in (r'(\d+)\s*(?:pax|personas?|pasajeros?|pasaj)\b',
+                r'\bx\s?(\d+)\b',
+                r'\bson\s+(\d+)\b',
+                r'\b(?:para|de)\s+(\d+)(?!\s*[/:hd])\b'):
+        m = re.search(pat, t)
+        if m:
+            return int(m.group(1))
+    m = re.search(r'\b(dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez)\s+(?:pax|personas?|pasajeros?)', t)
+    if m:
+        return int(NUM_WORDS[m.group(1)])
+    return None
+
+
+def _infer_year(day: int, month: int, today: date):
+    """Sin año explícito: la próxima vez que ocurra esa fecha."""
+    try:
+        d = date(today.year, month, day)
+    except ValueError:
+        return None
+    if d < today:
+        try:
+            d = date(today.year + 1, month, day)
+        except ValueError:
+            return None
+    return d
+
+
+def find_all_dates(text: str, today: date | None = None) -> list:
+    """Todas las fechas explícitas (D/M, D/M/AAAA, 'D de mes'), en orden de aparición."""
+    today = today or date.today()
+    t = _sin_tildes(text)
+    found = []
+    for m in re.finditer(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b', t):
+        day, month = int(m.group(1)), int(m.group(2))
+        if m.group(3):
+            y = int(m.group(3)); y = y + 2000 if y < 100 else y
+            try:
+                found.append((m.start(), date(y, month, day)))
+            except ValueError:
+                pass
+        else:
+            d = _infer_year(day, month, today)
+            if d: found.append((m.start(), d))
+    for m in re.finditer(r'\b(\d{1,2})\s+de\s+([a-z]+)', t):
+        month = MONTHS_ES.get(m.group(2))
+        if month:
+            d = _infer_year(int(m.group(1)), month, today)
+            if d: found.append((m.start(), d))
+    return [d for _, d in sorted(found, key=lambda x: x[0])]
+
+
+def detect_relative_date(text: str, today: date | None = None):
+    """hoy / mañana / pasado mañana / día de la semana."""
+    today = today or date.today()
+    t = _sin_tildes(text)
+    if re.search(r'pasado\s+manana', t):
+        return today + timedelta(days=2)
+    # "mañana" como día, no "a la mañana"
+    if re.search(r'(?<!la\s)\bmanana\b', t):
+        return today + timedelta(days=1)
+    if re.search(r'\bhoy\b', t):
+        return today
+    for day_name, day_num in DAYS_ES.items():
+        if re.search(rf'\b{_sin_tildes(day_name)}\b', t):
+            ahead = day_num - today.weekday()
+            if ahead <= 0:
+                ahead += 7
+            return today + timedelta(days=ahead)
+    return None
+
+
+def detect_date(text: str, today: date | None = None):
+    dates = find_all_dates(text, today)
+    return dates[0] if dates else detect_relative_date(text, today)
+
+
+def detect_hora(text: str):
+    t = _sin_tildes(text)
+    m = (re.search(r'\b(\d{1,2})[:.](\d{2})\s*(?:hs?|horas)?\b', t)
+         or re.search(r'\b(\d{1,2})\s*(?:hs|h|horas)\b', t)
+         or re.search(r'\ba\s+las\s+(\d{1,2})\b', t))
+    if not m:
+        return None
+    h = int(m.group(1))
+    mins = m.group(2) if m.lastindex and m.lastindex >= 2 else '00'
+    if h > 23:
+        return None
+    return f"{h}:{mins} hs"
+
+
+EXTRA_PATTERNS = {
+    'infusiones': (r'infusion|caja\s+de\s+te\b|\bte\s+y\s+cafe|\bcafe\s+y\s+te\b|set\s+de\s+(?:te|cafe)\b|'
+                   r'set\s+(?:para\s+)?(?:infusion|cafe)|\bcafe\b|hace\s+frio|dia\s+frio|\bdia\s+de\s+frio'),
+    'sopa':       r'\bsopa|calabaza',
+}
+
+
+def detect_extras(text: str) -> list:
+    t = _sin_tildes(text)
+    return [k for k, pat in EXTRA_PATTERNS.items() if re.search(pat, t)]
+
+
+def merge_followup(text: str, pending: dict) -> dict | None:
+    """
+    Con un borrador pendiente, intenta completarlo/corregirlo con reglas.
+    Devuelve el borrador actualizado, o None si no reconoce nada útil.
+    """
+    t = text.strip()
+    new = parse_message(t)
+    # Si el mensaje es un pedido completo nuevo, no es un complemento
+    if new.get('activity') and new.get('pax') and new.get('date'):
+        return None
+    merged = dict(pending)
+    changed = False
+    for field in ('activity', 'site', 'pax', 'date', 'guide', 'client', 'hora', 'hotel'):
+        if new.get(field) and new[field] != pending.get(field):
+            merged[field] = new[field]; changed = True
+    if new.get('activity'):
+        merged['gastronomy_type'] = new.get('gastronomy_type', 'AC')
+    for ex in new.get('extras') or []:
+        if ex not in (merged.get('extras') or []):
+            merged['extras'] = (merged.get('extras') or []) + [ex]; changed = True
+    if new.get('dietary_restrictions'):
+        merged['dietary_restrictions'] = ', '.join(filter(None, [pending.get('dietary_restrictions'),
+                                                                 new['dietary_restrictions']]))
+        changed = True
+    # Número suelto ("5") cuando falta la cantidad de pax
+    if not pending.get('pax') and re.fullmatch(r'\d{1,2}', t):
+        merged['pax'] = int(t); changed = True
+    # Nombre suelto ("Rodri") cuando falta el guía
+    if not changed and not pending.get('guide') and re.fullmatch(r'[A-Za-záéíóúñÁÉÍÓÚÑ]{3,15}', t):
+        merged['guide'] = t.title(); changed = True
+    return merged if changed else None
+
+
+def update_is_complete(upd: dict) -> bool:
+    """¿Las reglas entendieron la modificación lo suficiente como para ejecutarla?"""
+    if not upd or not upd.get('action') or not upd.get('date'):
+        return False
+    if upd['action'] in ('cancel', 'resend_planilla', 'reset_planilla'):
+        return True
+    if upd['action'] in ('add_extra', 'remove_extra'):
+        return bool(upd.get('new_value'))
+    if upd['action'] == 'edit_item':
+        nv = upd.get('new_value') or {}
+        return bool(nv.get('item')) and (nv.get('op') == 'remove' or nv.get('qty') not in (None, ''))
+    return upd.get('new_value') not in (None, '')
+
+
 def parse_message(text: str) -> dict:
     t = text.lower().strip()
     result = {}
 
     # ── Actividad ────────────────────────────────────────────────────────────
-    if ('kayak' in t and 'trekking' in t) or 'kayak y trek' in t:
-        result['activity'] = 'FD Kayak y Trekking'
-    elif 'kayak' in t:
-        result['activity'] = 'FD Kayak'
-    elif 'mtb' in t or 'mountain bike' in t or 'bici' in t:
-        result['activity'] = 'MTB'
-    elif 'trekking' in t or 'trek' in t:
-        result['activity'] = 'Trekking'
-    elif 'navegac' in t or 'barco' in t:
-        result['activity'] = 'Navegación'
-    else:
-        result['activity'] = None
+    result['activity'] = detect_activity(text)
+    result['extras'] = detect_extras(text)
+    result['_valle'] = (result['activity'] is None and bool(re.search(VALLE_AMBIGUO, _sin_tildes(text))))
 
     # ── Modalidad FD / HD (para gastronomía) ─────────────────────────────────
-    if 'hd' in t or 'half day' in t or 'medio d' in t:
-        result['gastronomy_type'] = 'snacks'
-    else:
-        result['gastronomy_type'] = 'AC'   # default full day = almuerzo campestre
+    result['gastronomy_type'] = 'snacks' if result['activity'] == 'HD Kayak' else 'AC'
 
     # ── Sitio ─────────────────────────────────────────────────────────────────
-    result['site'] = None
-    for key, val in SITES.items():
-        if key in t:
-            result['site'] = val
-            break
+    result['site'] = detect_site(text)
 
     # ── Cantidad de pax ───────────────────────────────────────────────────────
-    pax_m = re.search(r'(\d+)\s*pax', t)
-    if pax_m:
-        result['pax'] = int(pax_m.group(1))
-    else:
-        # "para 4" / "de 4" sin la palabra pax
-        pax_m2 = re.search(r'(?:para|de)\s+(\d+)(?!\s*/)', t)
-        result['pax'] = int(pax_m2.group(1)) if pax_m2 else None
+    result['pax'] = detect_pax(text)
 
     # ── Fecha ─────────────────────────────────────────────────────────────────
-    result['date'] = None
-    # D/M o D/M/YYYY
-    dm = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', text)
-    if dm:
-        day, month = int(dm.group(1)), int(dm.group(2))
-        year = int(dm.group(3)) if dm.group(3) else (
-            datetime.now().year if month >= datetime.now().month else datetime.now().year + 1
-        )
-        try:
-            result['date'] = date(year, month, day)
-        except ValueError:
-            pass
-    else:
-        # "el 14 de abril"
-        de_mes = re.search(r'\b(\d{1,2})\s+de\s+([a-záéíóú]+)', t)
-        if de_mes:
-            day = int(de_mes.group(1))
-            month = MONTHS_ES.get(de_mes.group(2))
-            if month:
-                year = datetime.now().year
-                try:
-                    result['date'] = date(year, month, day)
-                except ValueError:
-                    pass
+    result['date'] = detect_date(text)
 
     # ── Cliente / nombre de reserva ───────────────────────────────────────────
     result['client'] = None
@@ -244,19 +410,14 @@ def parse_message(text: str) -> dict:
     guide_m = re.search(
         r'gu[ií]a(?:\s+(?:es|va\s+a\s+ser|ser[aá]|:))?\s+'
         r'([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+'
-        r'(?:\s+(?!(?:hotel|pax|hay|con|para|el|la|los|las|de|del|en|al)\b)[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
+        r'(?:\s+(?!(?:hotel|pax|hay|con|para|el|la|los|las|de|del|en|al|a|y|x|hs|reserva|guia|gu[ií]a|son|uno|una|un)\b)[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
         text, re.IGNORECASE
     )
     if guide_m:
         result['guide'] = guide_m.group(1).strip().title()
 
     # ── Hora ─────────────────────────────────────────────────────────────────
-    result['hora'] = None
-    hora_m = re.search(r'\b(\d{1,2})[:.h](\d{2})?\s*hs?\b', t)
-    if hora_m:
-        h = hora_m.group(1)
-        m2 = hora_m.group(2) or '00'
-        result['hora'] = f"{h}:{m2} hs"
+    result['hora'] = detect_hora(text)
 
     # ── Hotel ─────────────────────────────────────────────────────────────────
     result['hotel'] = None
@@ -270,12 +431,70 @@ def parse_message(text: str) -> dict:
     # ── Restricciones alimentarias ────────────────────────────────────────────
     restrictions = []
     for pattern, formatter in DIET_PATTERNS:
-        m = re.search(pattern, t)
+        m = re.search(pattern, t) or re.search(pattern, _sin_tildes(t))
         if m:
             restrictions.append(formatter(m))
     result['dietary_restrictions'] = ', '.join(restrictions) if restrictions else None
 
     return result
+
+
+# ══ Edición de ítems de la planilla desde el chat ═════════════════════════════
+_ITEM = r'(?P<item>[a-zñ0-9][a-zñ0-9 .,/]*?)'
+_TARGET = r'\s+(?:en|al|a\s+la|a|del|de\s+la|para)\s+(?:el|la|los|las)?\s*(?=' \
+          r'kayak|trek|tronador|glaciares|limay|cascada|manso|san\s+martin|valle|hiking|brc|frey|goye|bella|naveg|barco|mtb|salida|excursion|' \
+          r'reserva|planilla|grupo|\d|[a-zñ]+\s+(?:del|de|el)\b|[a-zñ]+$)'
+_QTY = r'(?P<qty>\d+(?:[.,]\d+)?|un[ao]?|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|varios|varias)'
+
+ITEM_EDIT_PATTERNS = [
+    # "sacá las polainas del trekking de Rodri" / "quitale el vino a ..."
+    ('remove', rf'\b(?:saca(?:le)?|quita(?:le)?|elimina(?:le)?|borra(?:le)?)\s+(?:(?:el|la|los|las)\s+)?{_ITEM}{_TARGET}'),
+    # "agregá 2 termos al tronador de Rodri" / "sumale 1 vino"
+    ('add',    rf'\b(?:agrega(?:le)?|suma(?:le)?|anadi(?:le)?)\s+{_QTY}\s+{_ITEM}{_TARGET}'),
+    # "poné 4 vinos en el tronador de Rodri" / "dejá 2 heladeras"
+    ('set',    rf'\b(?:pone(?:le)?|deja(?:le)?|cambia|modifica|que\s+sean)\s+{_QTY}\s+{_ITEM}{_TARGET}'),
+    # "cambiá los vinos a 4 en el tronador de Rodri"
+    ('set',    rf'\b(?:cambia|modifica|pone|deja)\s+(?:el|la|los|las)\s+{_ITEM}\s+(?:a|en)\s+{_QTY}\b'),
+]
+
+
+def parse_item_edit(text: str):
+    """Detecta pedidos para cambiar un ítem de la planilla. Devuelve dict o None."""
+    t = _sin_tildes(text)
+    for op, pat in ITEM_EDIT_PATTERNS:
+        m = re.search(pat, t)
+        if not m:
+            continue
+        item = re.sub(r'^(?:el|la|los|las|un|una)\s+', '', m.group('item').strip(' .,'))
+        if not item or item in ('hora', 'horario', 'guia', 'fecha', 'dia', 'pax', 'hotel', 'lugar', 'sitio'):
+            return None
+        qty = None
+        if 'qty' in m.groupdict() and m.group('qty'):
+            q = m.group('qty')
+            qty = NUM_WORDS.get(q, q)
+        return {'op': op, 'item': item, 'qty': qty, 'rest': t[m.end('item'):]}
+    return None
+
+
+def parse_set_restrictions(text: str):
+    """'Las restricciones son: 1 celíaco' / 'sin restricciones' → valor completo nuevo."""
+    t = _sin_tildes(text)
+    if re.search(r'\b(?:sin|no\s+hay|no\s+tiene[n]?|saca(?:le)?\s+las|borra(?:le)?\s+las|quita(?:le)?\s+las)\s+restricciones', t):
+        return 'Ninguna'
+    m = re.search(r'restricciones?\s*(?:son|ahora\s+son|quedan|:)\s*:?\s*(.+)', text, re.IGNORECASE)
+    if not m:
+        return None
+    val = m.group(1)
+    found = []
+    for pattern, formatter in DIET_PATTERNS:
+        mm = re.search(pattern, _sin_tildes(val.lower()))
+        if mm:
+            found.append(formatter(mm))
+    if found:
+        return ', '.join(found)
+    # texto libre: cortar donde empieza la referencia a la salida
+    val = re.split(r'\s+(?:en|para|del|de\s+la|al)\s+(?:el|la)?\s*(?:kayak|trek|tronador|salida|reserva|valle|\d)', val, flags=re.I)[0]
+    return val.strip(' .') or None
 
 
 def parse_update(text: str) -> dict | None:
@@ -290,10 +509,16 @@ def parse_update(text: str) -> dict | None:
 
     # Detectar acción
     action = None
-    if re.search(r'cancel[ao]|no\s+va|se\s+cancela|suspende', t):
+    if re.search(r'planilla\s+(?:original|autom[aá]tica)|volv[eé]\s+a\s+la\s+planilla', t):
+        action = 'reset_planilla'
+    elif re.search(r'cancel[ao]|no\s+va|se\s+cancela|suspende', t):
         action = 'cancel'
     elif re.search(rf'{VERBS}\s+(?:el\s+|la\s+)?(?:hora|horario)|nueva\s+hora|cambi[oó]\s+(?:la\s+)?hora', t):
         action = 'update_hora'
+    elif re.search(r'\b(?:pas[aá]|mov[eé]|corr[eé])l[oa]s?\b', t) and detect_hora(text):
+        action = 'update_hora'
+    elif re.search(r'\b(?:pas[aá]|mov[eé]|corr[eé])l[oa]s?\b', t) and (find_all_dates(text) or detect_relative_date(text)):
+        action = 'update_date'
     elif re.search(rf'{VERBS}\s+(?:el\s+)?(?:gu[ií]a|guia)|nuevo\s+gu[ií]a|cambi[oó]\s+(?:el\s+)?gu[ií]a', t):
         action = 'update_guide'
     elif re.search(rf'{VERBS}\s+(?:el\s+)?(?:d[ií]a|fecha)|nueva\s+fecha|cambi[oó]\s+(?:la\s+)?fecha|mov[eé]la?\s+al?', t):
@@ -308,16 +533,29 @@ def parse_update(text: str) -> dict | None:
         action = 'resend_planilla'
     elif re.search(rf'reenv[ií]a[r]?|mand[aá][r]?\s+de\s+nuevo|pas[aá]me\s+(?:la\s+)?plan', t):
         action = 'resend_planilla'
+    elif detect_extras(text) and re.search(r'\b(?:saca|quita|elimina|borra|sin)\w*', _sin_tildes(t)) and \
+            re.search(r'\b(?:saca|quita|elimina|borra)\w*\s+(?:el|la|los|las)?\s*(?:set|infusion|sopa|te|cafe|termo)|\bsin\s+(?:sopa|infusion|cafe|te)', _sin_tildes(t)):
+        action = 'remove_extra'
+    elif detect_extras(text) and re.search(r'\b(?:agrega|suma|pone|lleva|quiero|incluye|anadi)\w*\s+(?:el\s+|la\s+|un\s+|una\s+)?(?:set|infusion|sopa|te|cafe|termo)', _sin_tildes(t)):
+        action = 'add_extra'
+    elif parse_set_restrictions(text):
+        action = 'set_restrictions'
     elif re.search(r'como\s+restricci[oó]n', t):
         action = 'update_restrictions'
-    elif re.search(DIET_KEYWORDS, t) and re.search(r'agrega[r]?|añadi[r]?|suma[r]?', t):
+    elif re.search(DIET_KEYWORDS, _sin_tildes(t)) and re.search(r'agrega[r]?|añadi[r]?|suma[r]?', t):
         action = 'update_restrictions'
-    elif re.search(DIET_KEYWORDS, t) and re.search(
+    elif re.search(DIET_KEYWORDS, _sin_tildes(t)) and re.search(
             r'hay\s+(?:un[ao]?|\d+|uno|dos|tres|cuatro|cinco)|tiene[n]?\s+(?:un[ao]?|\d+)', t):
         # "hay 2 celíacos" — solo es update si NO hay actividad en el mensaje
         # (con actividad = pedido nuevo de planilla)
-        if not re.search(r'kayak|mtb|mountain bike|trekking|trek|naveg', t):
+        if not mentions_activity(text):
             action = 'update_restrictions'
+
+    item_edit = None
+    if not action:
+        item_edit = parse_item_edit(text)
+        if item_edit:
+            action = 'edit_item'
 
     if not action:
         return None
@@ -331,36 +569,23 @@ def parse_update(text: str) -> dict | None:
     }
 
     # Extraer fecha(s) — la primera es la excursión a modificar
-    all_dates = list(re.finditer(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', text))
-    if not all_dates:
-        # Intentar "D de mes"
-        de_mes = re.search(r'\b(\d{1,2})\s+de\s+([a-záéíóú]+)', t)
-        if de_mes:
-            day_t = int(de_mes.group(1))
-            month_t = MONTHS_ES.get(de_mes.group(2))
-            if month_t:
-                try:
-                    result['date'] = date(datetime.now().year, month_t, day_t)
-                except ValueError:
-                    pass
-        if not result.get('date'):
-            return None
-    dm = all_dates[0]
-    day, month = int(dm.group(1)), int(dm.group(2))
-    year = int(dm.group(3)) if dm.group(3) else (
-        datetime.now().year if month >= datetime.now().month else datetime.now().year + 1
-    )
-    try:
-        result['date'] = date(year, month, day)
-    except ValueError:
-        return None
+    all_dates = find_all_dates(text)
+    if all_dates:
+        result['date'] = all_dates[0]
+    elif action != 'update_date':
+        result['date'] = detect_relative_date(text)
 
-    STOP_WORDS = {'el', 'la', 'los', 'las', 'en', 'al', 'del', 'un', 'una', 'de', 'para', 'con', 'hotel', 'pax', 'hay', 'reserva'}
+    STOP_WORDS = {'el', 'la', 'los', 'las', 'en', 'al', 'del', 'un', 'una', 'de', 'para', 'con', 'hotel', 'pax', 'hay', 'reserva', 'a', 'y', 'hs'}
 
-    # Identificador — guía o cliente
+    # Identificador — guía o cliente (en ediciones de ítem, se busca después del ítem)
+    id_text = item_edit['rest'] if item_edit else text
+    if action in ('add_extra', 'remove_extra'):
+        # "agregá el set de infusiones AL VALLE DE CINTIA": la salida viene después de al/del/en
+        parts = re.split(r'\s(?:al|a\s+la|del|de\s+la|en\s+el|en\s+la|para\s+el|para\s+la)\s', text, maxsplit=1, flags=re.I)
+        id_text = parts[1] if len(parts) > 1 else text
     guide_m = re.search(
         r'gu[ií]a\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
-        text, re.IGNORECASE
+        id_text, re.IGNORECASE
     )
     if guide_m:
         # Filtrar stop words del final
@@ -370,7 +595,7 @@ def parse_update(text: str) -> dict | None:
         result['identifier_type'] = 'guide'
     else:
         # Busca "de [Nombre]" — solo una palabra para evitar capturar "de Lark el 20/6"
-        client_m = re.search(r'\bde\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]{3,})', text, re.IGNORECASE)
+        client_m = re.search(r'\bde\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]{3,})', id_text, re.IGNORECASE)
         if client_m:
             word = client_m.group(1)
             if word.lower() not in STOP_WORDS:
@@ -379,13 +604,9 @@ def parse_update(text: str) -> dict | None:
 
     # Extraer nuevo valor según acción
     if action == 'update_hora':
-        hora_m = re.search(r'(?:a\s+las?\s+)?(\d{1,2})(?:[:.h](\d{2}))?\s*(?:hs?|am|pm)\b', t)
-        if hora_m:
-            h = int(hora_m.group(1))
-            m2 = hora_m.group(2) or '00'
-            if 'pm' in t and h < 12:
-                h += 12
-            result['new_value'] = f"{h}:{m2} hs"
+        # La hora nueva es la que viene después de "a las" / "para las"; si no, la primera
+        tail = re.search(r'\b(?:a|para)\s+las?\s+(.*)$', text, re.IGNORECASE)
+        result['new_value'] = (detect_hora('a las ' + tail.group(1)) if tail else None) or detect_hora(text)
 
     elif action == 'update_guide':
         new_m = re.search(
@@ -397,15 +618,15 @@ def parse_update(text: str) -> dict | None:
 
     elif action == 'update_date':
         if len(all_dates) >= 2:
-            dm2 = all_dates[1]
-            day2, month2 = int(dm2.group(1)), int(dm2.group(2))
-            year2 = int(dm2.group(3)) if dm2.group(3) else (
-                datetime.now().year if month2 >= datetime.now().month else datetime.now().year + 1
-            )
-            try:
-                result['new_value'] = date(year2, month2, day2)
-            except ValueError:
-                pass
+            result['new_value'] = all_dates[1]
+        else:
+            rel = detect_relative_date(text)
+            if rel:
+                result['new_value'] = rel
+            elif len(all_dates) == 1 and not re.search(r'\bdel\s+\d', _sin_tildes(text)):
+                # "pasalo al 22/6" sin decir la fecha original
+                result['new_value'] = all_dates[0]
+                result['date'] = None
 
     elif action == 'update_site':
         for key, val in SITES.items():
@@ -414,15 +635,22 @@ def parse_update(text: str) -> dict | None:
                 break
 
     elif action == 'update_pax':
-        pax_m = re.search(r'(\d+)\s*pax', t) or re.search(r'son\s+(\d+)|ahora\s+son\s+(\d+)', t)
-        if pax_m:
-            result['new_value'] = int(next(g for g in pax_m.groups() if g))
+        result['new_value'] = detect_pax(text)
 
     elif action == 'update_hotel':
         # "agrega el hotel Llao Llao" / "el hotel es Panamericano"
         hotel_m = re.search(r'hotel\s+(?:es\s+)?([A-Za-záéíóúüñÁÉÍÓÚÜÑ][A-Za-záéíóúüñÁÉÍÓÚÜÑ\s]+?)(?:\s*$|\s+en\s|\s+el\s|\s+\d)', text, re.IGNORECASE)
         if hotel_m:
             result['new_value'] = hotel_m.group(1).strip().title()
+
+    elif action in ('add_extra', 'remove_extra'):
+        result['new_value'] = detect_extras(text)
+
+    elif action == 'set_restrictions':
+        result['new_value'] = parse_set_restrictions(text)
+
+    elif action == 'edit_item':
+        result['new_value'] = {k: v for k, v in item_edit.items() if k != 'rest'}
 
     elif action == 'update_restrictions':
         # Formato libre: "agrega X como restriccion"
@@ -432,7 +660,7 @@ def parse_update(text: str) -> dict | None:
         else:
             restrictions = []
             for pattern, formatter in DIET_PATTERNS:
-                m = re.search(pattern, t)
+                m = re.search(pattern, t) or re.search(pattern, _sin_tildes(t))
                 if m:
                     restrictions.append(formatter(m))
             result['new_value'] = ', '.join(restrictions) if restrictions else None
@@ -443,7 +671,11 @@ def parse_update(text: str) -> dict | None:
 def format_missing(parsed: dict) -> list[str]:
     """Devuelve lista de campos faltantes para pedir al usuario."""
     missing = []
-    if not parsed.get('activity'): missing.append('actividad (kayak, MTB, trekking, etc.)')
+    if not parsed.get('activity'):
+        if parsed.get('_valle'):
+            missing.append('qué comida en Valle Encantado: asado, pollo al disco o trucha')
+        else:
+            missing.append('actividad (kayak, MTB, trekking, etc.)')
     if not parsed.get('pax'):      missing.append('cantidad de pax')
     if not parsed.get('date'):     missing.append('fecha (ej: 14/4)')
     return missing

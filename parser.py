@@ -141,6 +141,56 @@ def parse_correccion_lote(text: str, total: int):
 
 
 
+BACKROADS_GRUPOS = {
+    'multi adventure': 'Multi Adventure', 'multi': 'Multi Adventure', 'ma': 'Multi Adventure',
+    'easygoing': 'Easygoing', 'easy': 'Easygoing',
+    'regular': 'Regular',
+}
+DIETAS_BACKROADS = {
+    'veggie': 'veggie', 'vegetariano': 'veggie', 'vegetarianos': 'veggie', 'vegetariana': 'veggie',
+    'vegan': 'vegan', 'vegano': 'vegan', 'veganos': 'vegan', 'vegana': 'vegan',
+    'pescetarian': 'pescetarian', 'pescatariano': 'pescetarian', 'pescatarianos': 'pescetarian',
+    'pescetariano': 'pescetarian', 'regular': 'regular', 'regulares': 'regular',
+}
+
+
+def parse_backroads(text: str) -> dict | None:
+    """
+    "Backroads Multi Adventure del 9/12, 12 pax, 2 veggie y 1 vegan"
+    Devuelve los datos para completar la fila, o None si no habla de Backroads.
+    """
+    t = _sin_tildes(text)
+    if 'backroads' not in t:
+        return None
+
+    grupo = None
+    for clave in sorted(BACKROADS_GRUPOS, key=len, reverse=True):
+        if re.search(rf'\b{re.escape(clave)}\b', t):
+            grupo = BACKROADS_GRUPOS[clave]
+            break
+
+    dietas = {}
+    for m in re.finditer(r'(\d+)\s*([a-z]+)', t):
+        clave = DIETAS_BACKROADS.get(m.group(2))
+        if clave:
+            dietas[clave] = int(m.group(1))
+
+    personal = detect_personal(text)
+    pax = detect_pax(text)
+    if pax is None:
+        m = re.search(r'\bson\s+(\d+)\b', t)
+        pax = int(m.group(1)) if m else None
+
+    return {
+        'fecha': detect_date(text),
+        'grupo': grupo,
+        'actividad': detect_activity(text) and None,   # la actividad ya está en la planilla
+        'pax': pax,
+        'personal': personal,
+        'dietas': dietas,
+    }
+
+
 def parse_date_query(text: str) -> date | None:
     """
     Detecta si el mensaje es una consulta de qué hay en una fecha.
@@ -431,6 +481,15 @@ def detect_date(text: str, today: date | None = None):
     return dates[0] if dates else detect_relative_date(text, today)
 
 
+def detect_hora_entrega(text: str):
+    """La hora en que se entrega el despacho: 'entrega 7hs', 'dejar 7 en pasillo'."""
+    m = re.search(r'\b(?:entrega\w*|despach\w*|dej[aá]\w*|retir\w*\s+el\s+despacho)\b(.{0,28})',
+                  text, re.IGNORECASE)
+    if not m:
+        return None
+    return detect_hora(m.group(1))
+
+
 def detect_hora(text: str):
     t = _sin_tildes(text)
     m = (re.search(r'\b(\d{1,2})[:.](\d{2})\s*(?:hs?|horas)?\b', t)
@@ -574,7 +633,7 @@ def detect_wetsuit(text: str):
 
 
 
-CAMPOS_SUELTOS = ('client', 'agency', 'hotel', 'driver', 'guide', 'hora',
+CAMPOS_SUELTOS = ('client', 'agency', 'hotel', 'driver', 'guide', 'hora', 'hora_entrega',
                   'wetsuit', 'personal', 'dietary_restrictions')
 
 
@@ -588,7 +647,7 @@ def campos_sueltos(text: str) -> dict:
     out = {c: r[c] for c in CAMPOS_SUELTOS if r.get(c)}
     # Sin una etiqueta clara no se arriesga: evita tomar cualquier frase como nombre
     if not re.search(r'\b(?:nombre|cliente|reserva|agencia|hotel|aloja\w*|hosped\w*|conductor|chofer|'
-                     r'veh[ií]culo|vehiculo|transporte|gu[ií]a|talles?|botitas?|perso\w*|'
+                     r'veh[ií]culo|vehiculo|transporte|gu[ií]a|talles?|botitas?|perso\w*|entrega\w*|'
                      r'restricciones?|a\s+las?)\b', _sin_tildes(text)):
         return {}
     return out
@@ -607,7 +666,7 @@ def merge_followup(text: str, pending: dict) -> dict | None:
     merged = dict(pending)
     changed = False
     for field in ('activity', 'site', 'pax', 'date', 'guide', 'client', 'hora', 'hotel',
-                  'agency', 'driver', 'wetsuit', 'personal'):
+                  'agency', 'driver', 'wetsuit', 'personal', 'hora_entrega'):
         if new.get(field) and new[field] != pending.get(field):
             merged[field] = new[field]; changed = True
     if new.get('activity'):
@@ -678,7 +737,11 @@ def parse_message(text: str) -> dict:
     result['wetsuit'] = detect_wetsuit(text)
 
     # ── Hora ─────────────────────────────────────────────────────────────────
-    result['hora'] = detect_hora(text)
+    result['hora_entrega'] = detect_hora_entrega(text)
+    # La hora de retiro se busca sobre el texto sin el pedazo de la entrega,
+    # así "a las 9, entrega 7:30" no confunde una con la otra.
+    sin_entrega = re.sub(r'\b(?:entrega\w*|despach\w*|dej[aá]\w*)\b.{0,28}', ' ', text, flags=re.IGNORECASE)
+    result['hora'] = detect_hora(sin_entrega)
 
     # ── Hotel ─────────────────────────────────────────────────────────────────
     result['hotel'] = capture_name(text, HOTEL_PREFIX, max_words=3)

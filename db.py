@@ -52,6 +52,8 @@ def init_db():
             ('driver', 'TEXT'),
             ('wetsuit', 'TEXT'),
             ('personal', 'INTEGER'),
+            ('hora_entrega', 'TEXT'),
+            ('despacho_fila', 'INTEGER'),
         ]:
             try:
                 conn.execute(f'ALTER TABLE excursions ADD COLUMN {col} {definition}')
@@ -71,8 +73,8 @@ def save_excursion(data: dict) -> int:
             INSERT INTO excursions
                 (date, activity, site, pax, guide, hotel, client,
                  gastronomy_type, dietary_restrictions, hora, planilla_path, calendar_event_id, extras,
-                 agency, driver, wetsuit, personal)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 agency, driver, wetsuit, personal, hora_entrega)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (
             data.get('date').isoformat() if data.get('date') else None,
             data.get('activity'),
@@ -88,6 +90,7 @@ def save_excursion(data: dict) -> int:
             data.get('calendar_event_id'),
             ','.join(data.get('extras') or []) if isinstance(data.get('extras'), (list, tuple)) else data.get('extras'),
             data.get('agency'), data.get('driver'), data.get('wetsuit'), data.get('personal'),
+            data.get('hora_entrega'),
         ))
         return cur.lastrowid
 
@@ -128,7 +131,7 @@ def find_excursions(target_date: date, identifier: str = None, identifier_type: 
 def update_excursion(exc_id: int, field: str, value) -> bool:
     """Actualiza un campo de una excursión. Devuelve True si actualizó."""
     allowed = {'hora', 'guide', 'date', 'dietary_restrictions', 'pax', 'site', 'hotel', 'client', 'extras',
-               'agency', 'driver', 'wetsuit', 'personal'}
+               'agency', 'driver', 'wetsuit', 'personal', 'hora_entrega'}
     if field not in allowed:
         return False
     val = value.isoformat() if hasattr(value, 'isoformat') else value

@@ -100,7 +100,29 @@ Sin la clave, el bot funciona igual: solo te va a pedir más aclaraciones.
 
 No compartas la clave ni la pegues en el código o en GitHub: va solo en las Variables de Railway.
 
-### Paso 8 — Usarlo entre varias personas
+### Paso 8 — Planilla DESPACHOS (opcional)
+
+El bot puede anotar cada reserva en la planilla DESPACHOS de Drive.
+
+1. En Google Cloud, habilitá también la **Google Sheets API**
+2. Compartí la planilla con la cuenta del bot (el comando `/cuenta` te dice cuál es), con permiso de **Editor**
+3. En Railway agregá `DESPACHOS_SHEET_ID` con el id de la planilla
+   (lo sacás del link: `docs.google.com/spreadsheets/d/<ESTO>/edit`; también podés pegar el link entero)
+4. Probá con `/testdespachos`
+
+### Paso 9 — Planilla de Backroads (opcional)
+
+El bot completa los pasajeros, el personal y las dietas de los servicios ya cargados,
+y manda la reconfirmación de los de mañana todos los días a las 10:45.
+
+1. Compartí la planilla con la cuenta del bot (`/cuenta`), permiso de **Editor**
+2. En Railway agregá `BACKROADS_SHEET_ID` (podés pegar el link entero)
+3. Probá con `/testbackroads`
+
+Para completar un servicio, escribile al bot:
+`Backroads Multi Adventure del 9/12, 12 pax, 2 perso, 2 veggie y 1 vegan`
+
+### Paso 10 — Usarlo entre varias personas
 
 1. Creá un grupo de Telegram con las personas del equipo y agregá el bot
 2. En @BotFather: `/mybots` → tu bot → **Bot Settings** → **Group Privacy** → **Turn off**

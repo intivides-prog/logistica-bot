@@ -5,9 +5,10 @@ Tareas programadas:
 Zona horaria: America/Argentina/Buenos_Aires
 """
 import asyncio
+import os
 import re
 import logging
-from datetime import date, timedelta
+from datetime import datetime, date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
@@ -91,7 +92,9 @@ def build_gastro_summary(excursions: list) -> str:
 def build_guide_messages(excursions: list) -> list[str]:
     messages = []
     for ex in excursions:
-        guide = ex.get('guide') or 'Guía'
+        guide = (ex.get('guide') or '').strip()
+        if not guide:
+            continue          # sin guía asignado: va en el aviso aparte, no se arma mensaje
         activity = ex.get('activity') or '—'
         site     = ex.get('site') or '—'
         hora     = ex.get('hora') or 'a confirmar'
@@ -150,6 +153,20 @@ async def job_guide_messages(bot):
         return
     tomorrow = date.today() + timedelta(days=1)
     excursions = db.get_excursions_for_date(tomorrow)
+    sin_guia = [e for e in excursions if not (e.get('guide') or '').strip()]
+    if sin_guia:
+        detalle = '\n'.join(
+            f"• {e.get('activity') or '—'} — {e.get('pax') or '?'} pax"
+            + (f" ({e['client']})" if e.get('client') else '')
+            for e in sin_guia)
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ *Mañana hay {len(sin_guia)} salida(s) sin guía asignado:*\n{detalle}",
+                parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"[Scheduler] No pude avisar las salidas sin guía: {e}")
+
     messages = build_guide_messages(excursions) or [
         f"✅ No hay guías que notificar mañana ({tomorrow.strftime('%d/%m/%Y')})."]
     try:
@@ -161,6 +178,63 @@ async def job_guide_messages(bot):
 
 
 SCHEDULER = None      # referencia al scheduler activo, para el comando /avisos
+
+DIAS_SEMANA = ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado', 'domingo']
+
+
+async def job_backroads(bot):
+    """Reconfirmación de los servicios de Backroads de mañana."""
+    import sheets_service
+    logger.info("[Scheduler] Reconfirmación de Backroads.")
+    if not sheets_service.backroads_disponible():
+        return
+    chat_id = _notify_chat_id()
+    if not chat_id:
+        logger.warning("[Scheduler] Sin chat configurado para Backroads.")
+        return
+    manana = date.today() + timedelta(days=1)
+    try:
+        texto = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: sheets_service.backroads_reconfirmacion(manana))
+        if not texto:
+            return          # sin servicios ese día: no se manda nada
+        await bot.send_message(chat_id=chat_id, text=texto, parse_mode='Markdown')
+        logger.info("[Scheduler] Backroads enviado.")
+    except Exception as e:
+        logger.error(f"[Scheduler] No pude mandar la reconfirmación de Backroads: {e}")
+
+
+async def job_backup_db(bot):
+    """
+    Copia la base a Google Drive una vez por día. Se guarda una copia por día
+    de la semana, así siempre hay siete versiones para atrás sin que crezca.
+    """
+    import shutil
+    import tempfile
+    import drive_service
+
+    logger.info("[Scheduler] Backup diario de la base.")
+    if not os.path.exists(db.DB_PATH):
+        logger.warning("[Backup] No encontré la base en %s", db.DB_PATH)
+        return
+    dia = DIAS_SEMANA[datetime.now(TZ).weekday()]
+    nombre = f"backup-bot-{dia}.db"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            copia = os.path.join(tmp, nombre)
+            # copia consistente aunque el bot esté escribiendo
+            with db.get_conn() as conn:
+                destino = __import__('sqlite3').connect(copia)
+                conn.backup(destino)
+                destino.close()
+            link = drive_service.upload_file(copia, nombre)
+        if link:
+            logger.info(f"[Backup] Subido a Drive: {nombre}")
+        else:
+            logger.error("[Backup] No se pudo subir a Drive (revisar carpeta y permisos).")
+    except Exception as e:
+        logger.error(f"[Backup] Error haciendo el backup: {e}")
+
 
 
 def setup_scheduler(bot) -> AsyncIOScheduler:
@@ -177,6 +251,18 @@ def setup_scheduler(bot) -> AsyncIOScheduler:
         lambda: asyncio.ensure_future(job_guide_messages(bot)),
         CronTrigger(hour=16, minute=0, timezone=TZ),
         id='guide_messages',
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: asyncio.ensure_future(job_backroads(bot)),
+        CronTrigger(hour=10, minute=45, timezone=TZ),
+        id='backroads',
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: asyncio.ensure_future(job_backup_db(bot)),
+        CronTrigger(hour=3, minute=30, timezone=TZ),
+        id='backup_db',
         replace_existing=True,
     )
 

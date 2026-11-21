@@ -2,6 +2,7 @@
 Bot principal de Telegram para generación de planillas de excursiones.
 """
 import os
+import asyncio
 import re
 import logging
 import tempfile
@@ -21,6 +22,7 @@ import calendar_service
 import drive_service
 import ai_parser
 import planillas
+import sheets_service
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -53,9 +55,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         '• _"Plani fd kayak mascardi 3 pax 2/4 guia rodri"_\n\n'
         "Comandos disponibles:\n"
         "/proximas — ver próximas excursiones\n"
-        "/gastro — resumen de gastronomía de mañana\n"
-        "/guias — mensaje para guías de mañana\n"
+        "/gastro — gastronomía de mañana (o /gastro 25/12)\n"
+        "/guias — mensajes para guías de mañana (o /guias 25/12)\n"
         "/uso — cuántos mensajes usaron IA este mes\n"
+        "/backroads — servicios de Backroads de mañana\n"
         "/avisos — a dónde llegan los avisos diarios\n"
         "/version — qué versión del bot está corriendo\n\n"
         "🔔 Los avisos diarios (11 hs y 16 hs) van a llegar a este chat.",
@@ -85,27 +88,56 @@ async def cmd_proximas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No hay excursiones registradas en los próximos 7 días.")
 
 
-async def cmd_gastro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+def _fecha_pedida(ctx) -> date:
+    """La fecha que pusieron después del comando; si no hay, mañana."""
     from datetime import timedelta
-    tomorrow   = date.today() + timedelta(days=1)
-    excursions = db.get_excursions_for_date(tomorrow)
+    args = ' '.join(getattr(ctx, 'args', None) or []).strip()
+    if args:
+        fecha = msg_parser.detect_date(args)
+        if fecha:
+            return fecha
+    return date.today() + timedelta(days=1)
+
+
+def _como_se_dice(fecha: date) -> str:
+    from datetime import timedelta
+    if fecha == date.today():
+        return f"hoy ({fecha.strftime('%d/%m')})"
+    if fecha == date.today() + timedelta(days=1):
+        return f"mañana ({fecha.strftime('%d/%m')})"
+    return f"el {fecha.strftime('%d/%m/%Y')}"
+
+
+async def cmd_gastro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    fecha      = _fecha_pedida(ctx)
+    excursions = db.get_excursions_for_date(fecha)
     summary    = sched_module.build_gastro_summary(excursions)
     if summary:
         await update.message.reply_text(summary, parse_mode='Markdown')
     else:
-        await update.message.reply_text(f"No hay salidas registradas para mañana ({tomorrow.strftime('%d/%m/%Y')}).")
+        await update.message.reply_text(
+            f"No hay salidas registradas para {_como_se_dice(fecha)}.\n"
+            f"_Podés pedir otro día: /gastro 25/12_", parse_mode='Markdown')
 
 
 async def cmd_guias(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    from datetime import timedelta
-    tomorrow   = date.today() + timedelta(days=1)
-    excursions = db.get_excursions_for_date(tomorrow)
+    fecha      = _fecha_pedida(ctx)
+    excursions = db.get_excursions_for_date(fecha)
+    sin_guia   = [e for e in excursions if not (e.get('guide') or '').strip()]
     messages   = sched_module.build_guide_messages(excursions)
-    if messages:
-        for msg in messages:
-            await update.message.reply_text(msg, parse_mode='Markdown')
-    else:
-        await update.message.reply_text(f"No hay guías para notificar mañana ({tomorrow.strftime('%d/%m/%Y')}).")
+    if not messages:
+        await update.message.reply_text(
+            f"No hay guías para notificar {_como_se_dice(fecha)}.\n"
+            f"_Podés pedir otro día: /guias 25/12_", parse_mode='Markdown')
+        return
+    if sin_guia:
+        detalle = '\n'.join(f"• {e.get('activity') or '—'} — {e.get('pax') or '?'} pax"
+                            + (f" ({e['client']})" if e.get('client') else '')
+                            for e in sin_guia)
+        await update.message.reply_text(
+            f"⚠️ *{len(sin_guia)} salida(s) sin guía asignado:*\n{detalle}", parse_mode='Markdown')
+    for msg in messages:
+        await update.message.reply_text(msg, parse_mode='Markdown')
 
 
 async def cmd_testcal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -114,14 +146,38 @@ async def cmd_testcal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_testdrive(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Prueba de verdad el acceso a la carpeta de Drive."""
     import drive_service as ds
-    folder_id = os.environ.get('GOOGLE_DRIVE_FOLDER_ID', '(no configurado)')
-    creds_ok = bool(os.environ.get('GOOGLE_CREDENTIALS_JSON'))
+    await update.message.reply_text("🔎 Probando el acceso a Drive...")
+    try:
+        lineas = await asyncio.get_event_loop().run_in_executor(None, ds.check)
+    except Exception as e:
+        lineas = [f"❌ Error inesperado: {e}"]
+    await update.message.reply_text('\n'.join(lineas), parse_mode='Markdown')
+
+
+async def cmd_testdespachos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Prueba el acceso a la planilla DESPACHOS."""
+    await update.message.reply_text("🔎 Probando la planilla DESPACHOS...")
+    try:
+        lineas = await asyncio.get_event_loop().run_in_executor(None, sheets_service.check)
+    except Exception as e:
+        lineas = [f"❌ Error inesperado: {e}"]
+    await update.message.reply_text('\n'.join(lineas), parse_mode='Markdown')
+
+
+async def cmd_cuenta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Muestra la dirección de la cuenta del bot, para compartirle planillas."""
+    import drive_service as ds
+    mail = ds.cuenta_del_bot()
+    if not mail:
+        await update.message.reply_text("No encontré la cuenta del bot. ¿Está cargada GOOGLE_CREDENTIALS_JSON?")
+        return
     await update.message.reply_text(
-        f"GOOGLE_DRIVE_FOLDER_ID: {folder_id}\n"
-        f"GOOGLE_CREDENTIALS_JSON: {'✅ presente' if creds_ok else '❌ ausente'}\n"
-        f"GOOGLE_AVAILABLE: {ds.GOOGLE_AVAILABLE}"
-    )
+        f"La cuenta del bot es:\n`{mail}`\n\n"
+        "Para que pueda escribir en una planilla o carpeta de Drive, compartísela "
+        "con esa dirección y permiso de *Editor*.",
+        parse_mode='Markdown')
 
 
 async def handle_update_request(update: Update, upd: dict):
@@ -184,7 +240,11 @@ async def handle_update_request(update: Update, upd: dict):
 
     # ── Helper: regenera planilla con datos actualizados ─────────────────────
     async def _regenerate_planilla():
-        await _send_planilla(update, exc_id, "📋 Planilla actualizada")
+        resultado = await _sincronizar_despacho(exc_id)
+        extra = ""
+        if resultado and not resultado.get('ok'):
+            extra = f"\n⚠️ En DESPACHOS no pude actualizarla: {resultado.get('error')}"
+        await _send_planilla(update, exc_id, "📋 Planilla actualizada" + extra)
 
     if action == 'edit_item':
         nv = new_value or {}
@@ -251,13 +311,18 @@ async def handle_update_request(update: Update, upd: dict):
 
     if action == 'cancel':
         db.cancel_excursion(exc_id)
+        desp = await _sincronizar_despacho(exc_id, cancelada=True)
+        desp_msg = ''
+        if desp:
+            desp_msg = ("\n📄 Marcada como CANCELADO en DESPACHOS." if desp.get('ok')
+                        else "\n⚠️ No pude marcarla en DESPACHOS, revisala a mano.")
         cal_msg = ''
         if exc.get('calendar_event_id'):
             ok = calendar_service.delete_excursion(exc['calendar_event_id'])
             cal_msg = "\n📆 Evento borrado del Calendar." if ok else "\n⚠️ No pude borrar el evento del Calendar, borralo a mano."
         await update.message.reply_text(
             f"✅ Salida cancelada: {exc['activity']} — {fecha_str} "
-            f"(Guía: {exc['guide'] or '—'}){cal_msg}"
+            f"(Guía: {exc['guide'] or '—'}){cal_msg}{desp_msg}"
         )
 
     elif action == 'update_hora':
@@ -359,6 +424,20 @@ async def handle_update_request(update: Update, upd: dict):
         )
 
 
+async def _sincronizar_despacho(exc_id: int, cancelada: bool = False):
+    """Refleja en la planilla DESPACHOS lo que cambió en una salida."""
+    if not sheets_service.disponible():
+        return None
+    try:
+        fila = db.get_excursion(exc_id)
+        if not fila:
+            return None
+        return sheets_service.actualizar_despacho(fila, cancelada=cancelada)
+    except Exception as e:
+        logger.error(f"[Despachos] Error sincronizando: {e}")
+        return {'ok': False, 'error': str(e)[:120]}
+
+
 async def _send_planilla(update: Update, exc_id: int, caption: str):
     """Manda la planilla de una salida (la editada a mano si existe)."""
     try:
@@ -370,6 +449,10 @@ async def _send_planilla(update: Update, exc_id: int, caption: str):
             filepath, editada = planillas.build_file(row, tmpdir)
             if editada:
                 caption += "\n✏️ Versión editada a mano (actualicé solo la cabecera)"
+            try:
+                drive_service.upload_file(filepath, os.path.basename(filepath))
+            except Exception as e:
+                logger.error(f"[Drive] No pude subir la planilla actualizada: {e}")
             with open(filepath, 'rb') as f:
                 await update.message.reply_document(
                     document=f, filename=os.path.basename(filepath), caption=caption)
@@ -493,6 +576,10 @@ async def _generate_and_send(update: Update, parsed: dict, avisar: bool = True):
             logger.error(f"[Drive] Error: {e}")
             drive_link = None
 
+        despacho = sheets_service.agregar_despacho({**parsed, 'id': exc_id})
+        if despacho.get('ok'):
+            db.update_excursion(exc_id, 'despacho_fila', despacho['fila'])
+
         fecha_str = parsed['date'].strftime('%d/%m/%Y') if parsed.get('date') else '—'
         caption = (
             f"✅ *{parsed['activity']}*\n"
@@ -508,6 +595,9 @@ async def _generate_and_send(update: Update, parsed: dict, avisar: bool = True):
             caption += f"\n⚠️ Restricciones: {parsed['dietary_restrictions']}"
         if cal_link:
             caption += f"\n📆 [Ver en Calendar]({cal_link})"
+        if sheets_service.disponible():
+            caption += ("\n📄 Anotada en DESPACHOS" + (" (día nuevo)" if despacho.get('dia_nuevo') else '')
+                        if despacho.get('ok') else "\n⚠️ No pude anotarla en DESPACHOS")
         if drive_link:
             caption += f"\n📁 [Ver en Drive]({drive_link})"
 
@@ -570,7 +660,9 @@ def _resumen_borrador(parsed: dict) -> str:
     if parsed.get('wetsuit'):
         resumen += f"\n• Talles neoprene: {parsed['wetsuit']}"
     if parsed.get('hora'):
-        resumen += f"\n• Hora: {parsed['hora']}"
+        resumen += f"\n• Hora de retiro: {parsed['hora']}"
+    if parsed.get('hora_entrega'):
+        resumen += f"\n• Entrega del despacho: {parsed['hora_entrega']}"
     if parsed.get('dietary_restrictions'):
         resumen += f"\n• Restricciones: {parsed['dietary_restrictions']}"
     extras = generator.parse_extras(parsed.get('extras'))
@@ -645,6 +737,69 @@ async def _aplicar_campos(update: Update, exc_id: int, exc: dict, campos: dict):
             exc.get('activity'), fecha, exc.get('guide') or '—', '\n• '.join(aplicados)),
         parse_mode='Markdown')
     await _send_planilla(update, exc_id, "📋 Planilla actualizada")
+
+
+async def _handle_backroads(update: Update, datos: dict):
+    """Completa un servicio en la planilla de Backroads."""
+    if not sheets_service.backroads_disponible():
+        await update.message.reply_text(
+            "La planilla de Backroads no está configurada todavía (falta BACKROADS_SHEET_ID).")
+        return
+    if not datos.get('fecha'):
+        await update.message.reply_text(
+            "¿De qué fecha? Ej: _\"Backroads Multi Adventure del 9/12, 12 pax, 2 veggie\"_",
+            parse_mode='Markdown')
+        return
+    if datos.get('pax') is None and datos.get('personal') is None and not datos.get('dietas'):
+        await update.message.reply_text(
+            "¿Qué completo? Decime los pax, el personal o las dietas.\n"
+            "Ej: _\"Backroads Regular del 22/11, 13 pax, 4 perso, 1 veggie y 3 pescetarian\"_",
+            parse_mode='Markdown')
+        return
+
+    resultado = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: sheets_service.backroads_completar(
+            datos['fecha'], datos.get('grupo'), datos.get('actividad'),
+            datos.get('pax'), datos.get('personal'), datos.get('dietas')))
+
+    if not resultado.get('ok'):
+        texto = f"⚠️ {resultado.get('error')}"
+        if resultado.get('opciones'):
+            texto += "\n\n" + '\n'.join(f"• {o}" for o in resultado['opciones'])
+            texto += "\n\n_Decime cuál agregando el grupo o la actividad._"
+        await update.message.reply_text(texto, parse_mode='Markdown')
+        return
+
+    s = resultado['servicio']
+    partes = []
+    if datos.get('pax') is not None:
+        partes.append(f"{datos['pax']} pax")
+    if datos.get('personal') is not None:
+        partes.append(f"{datos['personal']} perso")
+    for dieta, valor in (datos.get('dietas') or {}).items():
+        partes.append(f"{valor} {dieta}")
+    await update.message.reply_text(
+        f"✅ Completé *{s['grupo']} · {s['actividad'] or 'sin actividad'}* "
+        f"del {s['fecha'].strftime('%d/%m/%Y')} ({s['servicio']}):\n• " + '\n• '.join(partes),
+        parse_mode='Markdown')
+
+
+async def cmd_backroads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """La reconfirmación de Backroads de mañana, o de la fecha que pidan."""
+    fecha = _fecha_pedida(ctx)
+    texto = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: sheets_service.backroads_reconfirmacion(fecha))
+    await update.message.reply_text(
+        texto or f"No hay servicios de Backroads {_como_se_dice(fecha)}.", parse_mode='Markdown')
+
+
+async def cmd_testbackroads(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔎 Probando la planilla de Backroads...")
+    try:
+        lineas = await asyncio.get_event_loop().run_in_executor(None, sheets_service.backroads_check)
+    except Exception as e:
+        lineas = [f"❌ Error inesperado: {e}"]
+    await update.message.reply_text('\n'.join(lineas), parse_mode='Markdown')
 
 
 async def _via_ai(update: Update, key, text: str) -> bool:
@@ -757,6 +912,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await _aplicar_campos(update, exc_id, exc, sueltos)
                 return
 
+    # Backroads: completar un servicio ya cargado en su planilla
+    br = msg_parser.parse_backroads(text)
+    if br:
+        db.incr_counter('reglas')
+        await _handle_backroads(update, br)
+        return
+
     # 4. Consulta de fecha ("qué hay el viernes") ──────────────────────────────
     query_date = msg_parser.parse_date_query(text)
     if query_date:
@@ -819,7 +981,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-VERSION = "v13 — 21/11/2026"
+VERSION = "v15 — 21/11/2026"
 NOVEDADES = [
     "Mensajes largos con todos los datos juntos",
     "Varias reservas en un mismo mensaje",
@@ -829,6 +991,11 @@ NOVEDADES = [
     "Reconfirmación de gastronomía con códigos (AC, BLG, EEPP…)",
     "Planillas con nombre tipo «21-11 Valle Encantado Asado x2»",
     "Códigos de gastronomía unificados (AC, BLG, BLT, EEPP, EPP, snacks)",
+    "Backup diario de la base a Drive",
+    "Aviso de salidas sin guía asignado",
+    "/gastro y /guias de cualquier fecha",
+    "Escribe cada reserva en la planilla DESPACHOS",
+    "Completa la planilla de Backroads y reconfirma el día anterior",
 ]
 
 
@@ -866,7 +1033,10 @@ async def cmd_avisos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sched = getattr(sched_module, 'SCHEDULER', None)
     if sched:
         for job in sched.get_jobs():
-            nombre = 'Gastronomía (11 hs)' if 'gastro' in job.id else 'Guías (16 hs)'
+            nombre = {'gastro_summary': 'Gastronomía (11 hs)',
+                      'guide_messages': 'Guías (16 hs)',
+                      'backroads': 'Backroads (10:45)',
+                      'backup_db': 'Backup de la base (3:30)'}.get(job.id, job.id)
             prox = job.next_run_time.strftime('%d/%m %H:%M') if job.next_run_time else '—'
             lineas.append(f"• {nombre}: próximo envío {prox}")
     else:
@@ -904,6 +1074,10 @@ def main():
     app.add_handler(CommandHandler("uso",       cmd_uso))
     app.add_handler(CommandHandler("avisos",    cmd_avisos))
     app.add_handler(CommandHandler("version",   cmd_version))
+    app.add_handler(CommandHandler("cuenta",    cmd_cuenta))
+    app.add_handler(CommandHandler("testdespachos", cmd_testdespachos))
+    app.add_handler(CommandHandler("backroads",     cmd_backroads))
+    app.add_handler(CommandHandler("testbackroads", cmd_testbackroads))
     app.add_handler(CommandHandler("testcal",   cmd_testcal))
     app.add_handler(CommandHandler("testdrive", cmd_testdrive))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

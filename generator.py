@@ -559,6 +559,55 @@ PERSONAL_DEFAULT = {
 }
 
 
+# Cómo se escribe cada salida en la planilla DESPACHOS.
+# Si el nombre cambia según el sitio, va la plantilla con {sitio}.
+DESPACHO_NOMBRES = {
+    'FD Kayak':                        'FD KAYAK/KAYAK Y TREKKING {sitio_corto}',
+    'HD Kayak':                        'HD KAYAK {sitio}',
+    'Montañas y Glaciares del Tronador': 'FD MONTAÑAS Y GLACIARES DEL TRONADOR',
+    'Rios y Lagos del Limay':          'RIOS Y LAGOS DEL LIMAY',
+    'Lagos y Cascadas del Manso':      'LAGOS Y CASCADAS DEL MANSO',
+    'San Martin de los Andes':         'FD SAN MARTIN DE LOS ANDES',
+    'FD Trekking':                     'FD TREKKING {sitio}',
+    'FD Trekking Frey':                'FD TREKKING FREY AGUJAS DEL CATEDRAL',
+    'FD Trekking Bella Vista / Goye':  'FD TREKKING BELLA VISTA/GOYE',
+    'FD Trekking Cerro Centinela':     'FD TREKKING CERRO CENTINELA (VLA)',
+    'Bariloche Hiking':                'BARILOCHE HIKING',
+    'HD Hiking Cerro Llao-Llao':       'HD HIKING CERRO LLAO-LLAO',
+    'FD Valle Encantado Hiking':       'FD VALLE ENCANTADO HIKING',
+    'Brazo Tristeza REG TRF PVT':      'BRAZO TRISTEZA REG TRF PVT Y GUIA',
+    'Navegacion AC':                   'NAVEGACION BRAZO TRISTEZA/ISLA PVT',
+    'Navegacion Regular':              'NAVEGACION REGULAR',
+    'FD MTB':                          'HD MTB {sitio}',
+    'HD MTB Bosque de Arrayanes':      'HD MTB BOSQUE DE ARRAYANES (VLA)',
+    'Valle Asado':                     'VALLE ENCANTADO ASADO',
+    'Valle Encantado Pollo':           'VALLE ENCANTADO POLLO',
+    'Valle Encantado Trucha':          'VALLE ENCANTADO TRUCHA',
+}
+
+# La navegación en Villa La Angostura tiene nombre propio
+DESPACHO_POR_SITIO = {
+    ('Navegacion AC', 'villa la angostura'):      'VILLA LA ANGOSTURA FD',
+    ('Navegacion Regular', 'villa la angostura'): 'NAVEGACION BAYS AND FOREST (VLA)',
+}
+
+
+def despacho_nombre(activity: str, site: str = None) -> str:
+    """El nombre de la salida tal como se escribe en la planilla DESPACHOS."""
+    act = resolve_activity(activity or '')
+    sitio = (site or default_site(act) or '').strip()
+    especial = DESPACHO_POR_SITIO.get((act, _sin_acentos(sitio)))
+    if especial:
+        return especial
+    plantilla = DESPACHO_NOMBRES.get(act)
+    if not plantilla:
+        return (act or '').upper()
+    if '{sitio' in plantilla:
+        corto = re.sub(r'^(?:lago|r[ií]o|base|cerro)\s+', '', sitio, flags=re.IGNORECASE)
+        return plantilla.format(sitio=sitio.upper(), sitio_corto=corto.upper()).strip()
+    return plantilla
+
+
 def gastro_code(activity: str) -> str:
     act = resolve_activity(activity or '')
     return GASTRO_CODES.get(act, 'BL')
@@ -566,6 +615,22 @@ def gastro_code(activity: str) -> str:
 
 def default_personal(activity: str) -> int:
     return PERSONAL_DEFAULT.get(resolve_activity(activity or ''), 2)
+
+
+# Las cuatro salidas con BLG cargan siempre el mismo equipo y mobiliario
+BLG_EQUIPO = [
+    ("Bastones",            OPT,       "optional"),
+    ("Radios",              OPT,       "optional"),
+    ("Mantitas norteñas",   f"={PAX}", "auto"),
+    ("Mesa",                "1",       "auto"),
+    ("Mantel",              "1",       "auto"),
+    ("Sillitas de camping", f"={PAX}", "auto"),
+    ("Vasos",               f"={PAX}", "auto"),
+    ("Sacacorchos",         "1",       "auto"),
+]
+for _blg in ('Montañas y Glaciares del Tronador', 'Rios y Lagos del Limay',
+             'Lagos y Cascadas del Manso', 'San Martin de los Andes'):
+    TEMPLATES[_blg]['equipment'] = [tuple(fila) for fila in BLG_EQUIPO]
 
 
 def default_site(activity: str):

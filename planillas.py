@@ -23,7 +23,8 @@ CUSTOM_DIR = os.path.join(os.path.dirname(db.DB_PATH) or '.', 'planillas_editada
 # Celdas de la cabecera (ver generator._cabecera)
 HEADER_CELLS = {
     'activity': 'B2', 'site': 'B3', 'date': 'B4', 'hora': 'B5', 'pax': 'B6',
-    'client': 'B7', 'hotel': 'B9', 'guide': 'B10', 'dietary_restrictions': 'B12',
+    'client': 'B7', 'agency': 'B8', 'hotel': 'B9', 'guide': 'B10', 'driver': 'B11',
+    'dietary_restrictions': 'B12',
 }
 
 

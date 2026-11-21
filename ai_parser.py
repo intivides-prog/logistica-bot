@@ -32,7 +32,9 @@ DAY_NAMES = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'd
 
 UPDATE_ACTIONS = [
     'cancel', 'update_hora', 'update_guide', 'update_date', 'update_site',
-    'update_pax', 'update_hotel', 'update_restrictions', 'set_restrictions', 'edit_item',
+    'update_pax', 'update_hotel', 'update_agency', 'update_driver', 'update_wetsuit', 'update_client',
+    'update_personal',
+    'update_restrictions', 'set_restrictions', 'edit_item',
     'add_extra', 'remove_extra',
     'resend_planilla', 'reset_planilla',
 ]
@@ -54,9 +56,10 @@ def _tool_schema() -> dict:
             'properties': {
                 'intent': {
                     'type': 'string',
-                    'enum': ['create', 'query', 'update', 'unknown'],
+                    'enum': ['create', 'create_batch', 'query', 'update', 'unknown'],
                     'description': (
                         'create = pedido de planilla/salida nueva (o completar/corregir el borrador pendiente); '
+                        'create_batch = VARIAS salidas en el mismo mensaje (una por línea o enumeradas); '
                         'query = consulta de qué salidas hay en una fecha; '
                         'update = modificar, cancelar o reenviar la planilla de una salida YA registrada; '
                         'unknown = no se entiende o no tiene que ver con el bot.'
@@ -71,12 +74,34 @@ def _tool_schema() -> dict:
                 'guide': {'type': 'string', 'description': 'Nombre del guía, con mayúscula inicial.'},
                 'client': {'type': 'string', 'description': 'Nombre de la reserva / cliente.'},
                 'hotel': {'type': 'string', 'description': 'Hotel de pickup.'},
+                'agency': {'type': 'string', 'description': 'Agencia o cliente corporativo que vende la salida (Say Hueque, GFT, Beyond BA…). No confundir con el nombre del pasajero.'},
+                'driver': {'type': 'string', 'description': 'Conductor o móvil ("Pablo", "SP 01", "H1").'},
+                'personal': {'type': 'integer', 'description': 'Cuánta gente de la empresa va ("2 perso", "+1 personal").'},
+                'wetsuit': {'type': 'string', 'description': 'Talles de botitas de neoprene, formato "38, 40, 42" o "2x40, 1x43".'},
                 'hora': {'type': 'string', 'description': 'Hora de retiro, formato "H:MM hs" (ej "9:30 hs").'},
                 'dietary_restrictions': {'type': 'string',
                                          'description': 'Formato: "2x vegetariano/a, 1x celíaco/a (sin TACC)".'},
                 'extras': {'type': 'array', 'items': {'type': 'string', 'enum': ['infusiones', 'sopa']},
                            'description': ('Extras para días fríos: infusiones = set de té/café (también si dicen '
                                            '"hace frío"); sopa = sopa de calabaza. En create, o en add_extra/remove_extra.')},
+                'salidas': {
+                    'type': 'array',
+                    'description': 'Solo para create_batch: una entrada por salida, con los mismos campos que create.',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'activity': {'type': 'string', 'enum': activities},
+                            'site': {'type': 'string'}, 'pax': {'type': 'integer'},
+                            'date': {'type': 'string'}, 'guide': {'type': 'string'},
+                            'client': {'type': 'string'}, 'agency': {'type': 'string'},
+                            'hotel': {'type': 'string'}, 'hora': {'type': 'string'},
+                            'driver': {'type': 'string'}, 'wetsuit': {'type': 'string'},
+                            'personal': {'type': 'integer'},
+                            'dietary_restrictions': {'type': 'string'},
+                            'extras': {'type': 'array', 'items': {'type': 'string', 'enum': ['infusiones', 'sopa']}},
+                        },
+                    },
+                },
                 # ---- query ----
                 'query_date': {'type': 'string', 'description': 'Fecha consultada, YYYY-MM-DD.'},
                 # ---- update ----
@@ -159,8 +184,14 @@ Sumar o sacar el set de infusiones/café o la sopa de calabaza a una salida ya r
 
 BORRADOR PENDIENTE de este usuario (planilla nueva aún no confirmada):
 {borrador}
+Si el mensaje trae VARIAS salidas (una por línea, o numeradas), usá intent=create_batch
+y poné cada una en salidas, repartiendo los datos comunes (fecha, agencia) a todas.
+
 Si el mensaje completa o corrige ese borrador ("son 5", "el guía es Rodri", "cambialo al 21"),
 devolvé intent=create con TODOS los datos del borrador combinados con la corrección.
+
+client es el NOMBRE del pasajero o de la reserva. agency es la agencia o empresa que la vende.
+Si dicen "cliente Say Hueque" eso es agency; "reserva Johnson" o "a nombre de Johnson" es client.
 
 Restricciones alimentarias: formato "Nx descripción", separadas por coma.
 Ej: "2x vegetariano/a, 1x celíaco/a (sin TACC), 1x vegano/a, alergia frutos secos".
@@ -180,6 +211,27 @@ def _to_date(val):
 
 def _gastro_type(activity: str) -> str:
     return 'snacks' if activity == 'HD Kayak' else 'AC'
+
+
+def _datos_create(out: dict) -> dict:
+    """Pasa la salida de la IA al formato que usa el resto del bot."""
+    activity = out.get('activity')
+    return {
+        'activity': activity,
+        'gastronomy_type': _gastro_type(activity) if activity else 'AC',
+        'site': out.get('site'),
+        'pax': out.get('pax'),
+        'date': _to_date(out.get('date')),
+        'client': out.get('client'),
+        'guide': out.get('guide'),
+        'hora': out.get('hora'),
+        'hotel': out.get('hotel'),
+        'agency': out.get('agency'),
+        'driver': out.get('driver'),
+        'wetsuit': out.get('wetsuit'),
+        'dietary_restrictions': out.get('dietary_restrictions'),
+        'extras': [e for e in (out.get('extras') or []) if e in ('infusiones', 'sopa')],
+    }
 
 
 def interpret(text: str, upcoming: list | None = None, pending: dict | None = None,
@@ -214,22 +266,17 @@ def interpret(text: str, upcoming: list | None = None, pending: dict | None = No
     logger.info(f"[IA] {text!r} → {out}")
     intent = out.get('intent')
 
+    if intent == 'create_batch':
+        salidas = [_datos_create(x) for x in (out.get('salidas') or [])]
+        salidas = [x for x in salidas if x.get('activity') or x.get('pax')]
+        if len(salidas) >= 2:
+            return {'intent': 'create_batch', 'data': salidas}
+        if salidas:
+            return {'intent': 'create', 'data': salidas[0]}
+        return None
+
     if intent == 'create':
-        activity = out.get('activity')
-        data = {
-            'activity': activity,
-            'gastronomy_type': _gastro_type(activity) if activity else 'AC',
-            'site': out.get('site'),
-            'pax': out.get('pax'),
-            'date': _to_date(out.get('date')),
-            'client': out.get('client'),
-            'guide': out.get('guide'),
-            'hora': out.get('hora'),
-            'hotel': out.get('hotel'),
-            'dietary_restrictions': out.get('dietary_restrictions'),
-            'extras': [e for e in (out.get('extras') or []) if e in ('infusiones', 'sopa')],
-        }
-        return {'intent': 'create', 'data': data}
+        return {'intent': 'create', 'data': _datos_create(out)}
 
     if intent == 'query':
         d = _to_date(out.get('query_date'))
@@ -247,7 +294,7 @@ def interpret(text: str, upcoming: list | None = None, pending: dict | None = No
             new_value = [e for e in (out.get('extras') or []) if e in ('infusiones', 'sopa')]
         elif action == 'edit_item':
             new_value = {'op': out.get('item_op') or 'set', 'item': out.get('item'), 'qty': out.get('quantity')}
-        elif action == 'update_pax':
+        elif action in ('update_pax', 'update_personal'):
             try:
                 new_value = int(new_value)
             except (TypeError, ValueError):

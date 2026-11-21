@@ -137,6 +137,19 @@ def add_extras_sections(ws, start_row, extras) -> int:
     return row
 
 
+def _personal_val(label, valor, params):
+    """Si cargaron cuánto personal va, esa fila usa ese número."""
+    if params.get('personal') is not None and _sin_acentos(label).startswith('personal'):
+        return params['personal']
+    return valor
+
+
+def _sin_acentos(text: str) -> str:
+    import unicodedata
+    return ''.join(c for c in unicodedata.normalize('NFD', str(text).lower())
+                   if unicodedata.category(c) != 'Mn')
+
+
 def _cabecera(ws, params):
     fecha = params.get('date')
     fecha_str = fecha.strftime('%d/%m/%Y') if isinstance(fecha, date) else (fecha or '')
@@ -146,11 +159,11 @@ def _cabecera(ws, params):
     _lv(ws, 4,  "FECHA:",             fecha_str,                    mode="auto")
     _lv(ws, 5,  "HORA DE RETIRO:",    params.get('hora') or '',     mode="input")
     _lv(ws, 6,  "CANT. PAX:",         params.get('pax') or 0,      mode="auto")
-    _lv(ws, 7,  "NOMBRE / CONTACTO:", params.get('client') or '',   mode="input")
-    _lv(ws, 8,  "CLIENTE / AGENCIA:", '',                           mode="input")
+    _lv(ws, 7,  "NOMBRE:",            params.get('client') or '',   mode="input")
+    _lv(ws, 8,  "CLIENTE / AGENCIA:", params.get('agency') or '',   mode="input")
     _lv(ws, 9,  "HOTEL:",             params.get('hotel') or '',    mode="input")
     _lv(ws, 10, "GUIA:",              params.get('guide') or '',    mode="input")
-    _lv(ws, 11, "CONDUCTOR:",         '',                           mode="input")
+    _lv(ws, 11, "CONDUCTOR:",         params.get('driver') or '',   mode="input")
     _lv(ws, 12, "RESTRICCIONES:",     params.get('dietary_restrictions') or 'Ninguna', mode="input")
     ws["A6"].font = Font(name="Arial", bold=True, size=10, color="CC0000")
     ws["B6"].font = Font(name="Arial", bold=True, size=11, color="1A6B1A")
@@ -414,10 +427,61 @@ TEMPLATES = {
             ("Ensaladas",                       "varias",                 "input"),
             ("Verduras para parrilla",          "varias",                 "input"),
             ("Dulce de leche",                  "1",                      "auto"),
-            ("Postre / Brownie",                f"={PAX}",                "auto"),
+            ("Postre / Flan",                   f"={PAX}",                "auto"),
             ("Crema",                           "1",                      "auto"),
         ],
         'gastronomy_type': 'asado',
+    },
+
+    'Brazo Tristeza REG TRF PVT': {
+        'gastronomy_title': 'GASTRONOMIA — Box Lunch Trekking',
+        'default_site': 'Brazo Tristeza',
+        'equipment': [
+            ("Bastones", OPT, "optional"),
+            ("Radios",   OPT, "optional"),
+        ],
+        'gastronomy': [
+            ("BLT",          f"={PAX}", "auto"),
+            ("Personal",     "1",       "input"),
+            ("Aguas 600ml",  f"={PAX}", "auto"),
+            ("Agua 1.5L",    AGUA_15,   "auto"),
+        ],
+        'no_drinks': True,
+        'gastronomy_type': 'BL',
+    },
+
+    'HD Hiking Cerro Llao-Llao': {
+        'gastronomy_title': 'GASTRONOMIA — Snacks de marcha',
+        'default_site': 'Cerro Llao Llao',
+        'equipment': [
+            ("Bastones", OPT, "optional"),
+            ("Radios",   OPT, "optional"),
+        ],
+        'gastronomy': [
+            ("Snacks de marcha", f"={PAX}", "auto"),
+            ("Personal",         "1",       "input"),
+            ("Aguas 600ml",      f"={PAX}", "auto"),
+            ("Agua 1.5L",        AGUA_15,   "auto"),
+        ],
+        'no_drinks': True,
+        'gastronomy_type': 'snacks',
+    },
+
+    'FD Valle Encantado Hiking': {
+        'gastronomy_title': 'GASTRONOMIA — Box Lunch Trekking',
+        'default_site': 'Valle Encantado',
+        'equipment': [
+            ("Bastones", OPT, "optional"),
+            ("Radios",   OPT, "optional"),
+        ],
+        'gastronomy': [
+            ("BLT",          f"={PAX}", "auto"),
+            ("Personal",     "1",       "input"),
+            ("Aguas 600ml",  f"={PAX}", "auto"),
+            ("Agua 1.5L",    AGUA_15,   "auto"),
+        ],
+        'no_drinks': True,
+        'gastronomy_type': 'BL',
     },
 }
 
@@ -442,9 +506,58 @@ TEMPLATES['San Martin de los Andes']   = _variant('Rios y Lagos del Limay', defa
 # Trekkings: misma planilla, cambia el destino
 TEMPLATES['FD Trekking Frey']             = _variant('FD Trekking', default_site='Base Cerro Catedral')
 TEMPLATES['FD Trekking Bella Vista / Goye'] = _variant('FD Trekking', default_site='Bella Vista / Cerro Goye')
+# Mismo equipo y gastronomía que los otros trekkings y MTB, cambia el destino
+TEMPLATES['FD Trekking Cerro Centinela'] = _variant('FD Trekking', default_site='Cerro Centinela (VLA)')
+TEMPLATES['HD MTB Bosque de Arrayanes'] = _variant('FD MTB', default_site='Bosque de Arrayanes (VLA)')
 # Valle Asado: sitio por defecto
 TEMPLATES['Valle Asado'].setdefault('default_site', 'Valle Encantado')
+TEMPLATES['Rios y Lagos del Limay'].setdefault('default_site', 'Río Limay')
+TEMPLATES['Bariloche Hiking'].setdefault('default_site', 'Llao Llao')
 TEMPLATES['Montañas y Glaciares del Tronador'].setdefault('default_site', 'Tronador')
+
+
+# Código corto que se usa en la reconfirmación de gastronomía de las 11.
+# ⚠️ Si alguno no coincide con cómo lo nombran ustedes, cambiar acá.
+GASTRO_CODES = {
+    'FD Kayak':                        'AC',
+    'FD Kayak y Trekking':             'AC',
+    'Navegacion AC':                   'AC',
+    'HD Kayak':                        'SNACKS',
+    'Montañas y Glaciares del Tronador': 'BLG',
+    'Rios y Lagos del Limay':          'BLG',
+    'Lagos y Cascadas del Manso':      'BLG',
+    'San Martin de los Andes':         'BLG',
+    'FD Trekking':                     'BLTREK',
+    'FD Trekking Frey':                'BLTREK',
+    'FD Trekking Bella Vista / Goye':  'BLTREK',
+    'Bariloche Hiking':                'BL',
+    'FD MTB':                          'BL',
+    'Navegacion Regular':              'BL',
+    'Valle Asado':                     'EEPP',
+    'Valle Encantado Trucha':          'EEPP',
+    'Valle Encantado Pollo':           'POLLO',
+    'Brazo Tristeza REG TRF PVT':      'BLT',
+    'HD Hiking Cerro Llao-Llao':       'SNACKS',
+    'FD Valle Encantado Hiking':       'BLT',
+    'FD Trekking Cerro Centinela':     'BLTREK',
+    'HD MTB Bosque de Arrayanes':      'BL',
+}
+
+# Cuánto personal lleva cada salida por defecto (guía + conductor, o solo guía)
+PERSONAL_DEFAULT = {
+    'FD Trekking': 1, 'FD Trekking Frey': 1, 'FD Trekking Bella Vista / Goye': 1,
+    'FD Trekking Cerro Centinela': 1, 'Brazo Tristeza REG TRF PVT': 1,
+    'HD Hiking Cerro Llao-Llao': 1,
+}
+
+
+def gastro_code(activity: str) -> str:
+    act = resolve_activity(activity or '')
+    return GASTRO_CODES.get(act, 'BL')
+
+
+def default_personal(activity: str) -> int:
+    return PERSONAL_DEFAULT.get(resolve_activity(activity or ''), 2)
 
 
 def default_site(activity: str):
@@ -484,6 +597,11 @@ ACTIVITY_ALIASES = {
     'frey':                'FD Trekking Frey',
     'goye':                'FD Trekking Bella Vista / Goye',
     'bella vista':         'FD Trekking Bella Vista / Goye',
+    'centinela':           'FD Trekking Cerro Centinela',
+    'arrayanes':           'HD MTB Bosque de Arrayanes',
+    'brazo tristeza':      'Brazo Tristeza REG TRF PVT',
+    'cerro llao llao':     'HD Hiking Cerro Llao-Llao',
+    'valle encantado hiking': 'FD Valle Encantado Hiking',
 }
 
 
@@ -521,9 +639,17 @@ def generate(params: dict, output_dir: str = ".") -> str:
     row = 14
     _sec(ws, row, "  EQUIPAMIENTO");   row += 1
     _hdr(ws, row);                     row += 1
+    talles = params.get('wetsuit')
+    usados = False
     for lbl, val, mode in equip:
         display = OPT if mode == "optional" else val
+        # Si ya hay una fila de botitas, los talles van ahí en vez de repetirse abajo
+        if talles and not usados and re.search(r'botita.*talle', _sin_acentos(lbl)):
+            display, mode, usados = talles, "input", True
         _it(ws, row, lbl, display, mode=mode)
+        row += 1
+    if talles and not usados:
+        _it(ws, row, "Botitas neoprene (talles)", talles, mode="input")
         row += 1
     _gap(ws, row); row += 1
 
@@ -539,12 +665,12 @@ def generate(params: dict, output_dir: str = ".") -> str:
         mesa2_row = row + 1
         rows_data = _get_almuerzo_campestre_rows(mesa4_row, mesa2_row, barco=tmpl.get('barco', False))
         for lbl, val, mode in rows_data:
-            _it(ws, row, lbl, val, mode=mode)
+            _it(ws, row, lbl, _personal_val(lbl, val, params), mode=mode)
             row += 1
     else:
         for lbl, val, mode in gastronomy:
             display = OPT if mode == "optional" else val
-            _it(ws, row, lbl, display, mode=mode)
+            _it(ws, row, lbl, _personal_val(lbl, display, params), mode=mode)
             row += 1
 
     _gap(ws, row); row += 1
@@ -558,9 +684,11 @@ def generate(params: dict, output_dir: str = ".") -> str:
     add_extras_sections(ws, row, params.get('extras'))
 
     # Guardar
-    act_slug  = activity.replace(' ', '_').replace('/', '-')
-    date_slug = fecha.strftime('%Y%m%d') if isinstance(fecha, date) else 'sin_fecha'
-    filename  = f"Planilla_{act_slug}_{date_slug}_{pax}pax.xlsx"
+    # Nombre: "16-11 Valle Encantado Asado x2.xlsx"
+    # (la barra no se puede usar en un nombre de archivo, por eso 16-11 y no 16/11)
+    date_slug = fecha.strftime('%d-%m') if isinstance(fecha, date) else 'sin fecha'
+    nombre_act = re.sub(r'[\\/*?:\[\]]', '-', activity).strip()
+    filename  = f"{date_slug} {nombre_act} x{pax}.xlsx"
     filepath  = os.path.join(output_dir, filename)
     wb.save(filepath)
     return filepath

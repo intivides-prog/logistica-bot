@@ -48,6 +48,10 @@ def init_db():
             ('planilla_custom', 'TEXT'),
             ('item_edits', 'TEXT'),
             ('extras', 'TEXT'),
+            ('agency', 'TEXT'),
+            ('driver', 'TEXT'),
+            ('wetsuit', 'TEXT'),
+            ('personal', 'INTEGER'),
         ]:
             try:
                 conn.execute(f'ALTER TABLE excursions ADD COLUMN {col} {definition}')
@@ -66,8 +70,9 @@ def save_excursion(data: dict) -> int:
         cur = conn.execute('''
             INSERT INTO excursions
                 (date, activity, site, pax, guide, hotel, client,
-                 gastronomy_type, dietary_restrictions, hora, planilla_path, calendar_event_id, extras)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 gastronomy_type, dietary_restrictions, hora, planilla_path, calendar_event_id, extras,
+                 agency, driver, wetsuit, personal)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ''', (
             data.get('date').isoformat() if data.get('date') else None,
             data.get('activity'),
@@ -82,6 +87,7 @@ def save_excursion(data: dict) -> int:
             data.get('planilla_path'),
             data.get('calendar_event_id'),
             ','.join(data.get('extras') or []) if isinstance(data.get('extras'), (list, tuple)) else data.get('extras'),
+            data.get('agency'), data.get('driver'), data.get('wetsuit'), data.get('personal'),
         ))
         return cur.lastrowid
 
@@ -121,7 +127,8 @@ def find_excursions(target_date: date, identifier: str = None, identifier_type: 
 
 def update_excursion(exc_id: int, field: str, value) -> bool:
     """Actualiza un campo de una excursión. Devuelve True si actualizó."""
-    allowed = {'hora', 'guide', 'date', 'dietary_restrictions', 'pax', 'site', 'hotel', 'client', 'extras'}
+    allowed = {'hora', 'guide', 'date', 'dietary_restrictions', 'pax', 'site', 'hotel', 'client', 'extras',
+               'agency', 'driver', 'wetsuit', 'personal'}
     if field not in allowed:
         return False
     val = value.isoformat() if hasattr(value, 'isoformat') else value

@@ -21,6 +21,39 @@ SITES = {
     'espejo':       'Lago Espejo',
     'villa la angostura': 'Villa La Angostura',
     'vla':          'Villa La Angostura',
+    'moreno':       'Lago Moreno',
+    'gutierrez':    'Lago Gutiérrez',
+    'guillelmo':    'Lago Guillelmo',
+    'steffen':      'Lago Steffen',
+    'hess':         'Lago Hess',
+    'roca':         'Lago Roca',
+    'correntoso':   'Lago Correntoso',
+    'escondido':    'Lago Escondido',
+    'catedral':     'Base Cerro Catedral',
+    'frey':         'Refugio Frey',
+    'goye':         'Cerro Goye',
+    'bella vista':  'Bella Vista',
+    'bahia lopez':  'Bahía López',
+    'puerto panuelo': 'Puerto Pañuelo',
+    'pañuelo':      'Puerto Pañuelo',
+    'arelauquen':   'Arelauquen',
+    'manso':        'Río Manso',
+    'limay':        'Río Limay',
+    'alerces':      'Cascada de los Alerces',
+    'valle encantado': 'Valle Encantado',
+    'tronador':     'Tronador',
+    'san martin':   'San Martín de los Andes',
+    'lopez':        'Cerro López',
+    'ventana':      'Cerro Ventana',
+    'cerro campanario': 'Cerro Campanario',
+    'centinela':    'Cerro Centinela (VLA)',
+    'arrayanes':    'Bosque de Arrayanes (VLA)',
+    'tristeza':     'Brazo Tristeza',
+    'cerro llao':   'Cerro Llao Llao',
+    'lagos y montanas': 'Lagos y Montañas',
+    'peninsula petit': 'Península Petit',
+    'radisson':     'Radisson Blu',
+    'circuito chico': 'Circuito Chico',
 }
 
 MONTHS_ES = {
@@ -34,6 +67,79 @@ DAYS_ES = {
 }
 
 # ── Consultas de fecha en lenguaje natural ────────────────────────────────────
+
+# ══ Varias reservas en un mismo mensaje ══════════════════════════════════════
+
+def split_reservas(text: str) -> list:
+    """
+    Separa un mensaje con varias salidas. Cada línea (o cada ítem numerado /
+    con guión) es una salida, siempre que mencione una actividad.
+    Devuelve [] si es un pedido de una sola salida.
+    """
+    bruto = [l.strip() for l in text.splitlines()]
+    lineas = []
+    for l in bruto:
+        l = re.sub(r'^\s*(?:\d{1,2}[.)\-]|[-•*·])\s*', '', l).strip()
+        if l:
+            lineas.append(l)
+    # Encabezado tipo "para el viernes:" que aplica a todas
+    encabezado = ''
+    if lineas and not mentions_activity(lineas[0]) and len(lineas) > 1:
+        encabezado = lineas.pop(0).rstrip(':').strip()
+    con_actividad = [l for l in lineas if mentions_activity(l)]
+    if len(con_actividad) < 2:
+        return []
+    salidas = []
+    for l in lineas:
+        if not mentions_activity(l):
+            # línea suelta de detalle: se suma a la anterior
+            if salidas:
+                salidas[-1] = salidas[-1] + ' ' + l
+            continue
+        salidas.append((encabezado + ' ' + l).strip() if encabezado else l)
+    return salidas
+
+
+def parse_reservas(text: str) -> list:
+    """Devuelve una lista de salidas parseadas, o [] si no es un mensaje en lote."""
+    trozos = split_reservas(text)
+    if not trozos:
+        return []
+    return [parse_message(t) for t in trozos]
+
+
+# "en la 2 el guía es Fede" / "la primera son 5 pax" / "a la 3 agregale hotel X"
+ORDINALES = {
+    'primera': 1, 'primero': 1, 'uno': 1, 'una': 1,
+    'segunda': 2, 'segundo': 2, 'dos': 2,
+    'tercera': 3, 'tercero': 3, 'tres': 3,
+    'cuarta': 4, 'cuarto': 4, 'cuatro': 4,
+    'quinta': 5, 'quinto': 5, 'cinco': 5,
+    'ultima': 99, 'último': 99, 'ultimo': 99,
+}
+
+
+def parse_correccion_lote(text: str, total: int):
+    """
+    Detecta a qué salida del lote se refiere una corrección.
+    Devuelve (indice_0based, texto_sin_la_referencia) o None.
+    """
+    t = _sin_tildes(text)
+    m = re.search(r'\b(?:en|a|para|de)\s+(?:la|el)\s+(\d{1,2}|' + '|'.join(ORDINALES) + r')\b', t)
+    if not m:
+        m = re.search(r'^\s*(?:la|el)\s+(\d{1,2}|' + '|'.join(ORDINALES) + r')\b', t)
+    if not m:
+        return None
+    crudo = m.group(1)
+    num = int(crudo) if crudo.isdigit() else ORDINALES.get(crudo, 0)
+    if num == 99:
+        num = total
+    if not (1 <= num <= total):
+        return None
+    resto = (text[:m.start()] + ' ' + text[m.end():]).strip()
+    return num - 1, resto
+
+
 
 def parse_date_query(text: str) -> date | None:
     """
@@ -175,10 +281,16 @@ def _sin_tildes(text: str) -> str:
 # Orden importa: lo más específico primero.
 # (condición sobre el texto sin tildes, nombre de la actividad)
 ACTIVITY_RULES = [
+    # Las más específicas primero: si no, "valle encantado hiking" cae en Valle a secas
+    (r'valle\s+encantado\s+hiking|hiking\s+valle\s+encantado',    'FD Valle Encantado Hiking'),
+    (r'centinela',                                                  'FD Trekking Cerro Centinela'),
+    (r'arrayanes',                                                  'HD MTB Bosque de Arrayanes'),
+    (r'cerro\s+llao|llao\s*-?\s*llao\s+hiking|hiking\s+llao',     'HD Hiking Cerro Llao-Llao'),
+    (r'brazo\s+tristeza|tristeza',                                  'Brazo Tristeza REG TRF PVT'),
     (r'\b(hd|half\s*day|medio\s*dia)\b.*\bkayak|\bkayak\b.*\b(hd|half\s*day|medio\s*dia)\b', 'HD Kayak'),
     (r'\bkayak\b.*\btrek|\btrek.*\bkayak\b',                       'FD Kayak y Trekking'),
     (r'\bkayak',                                                    'FD Kayak'),
-    (r'tronador|glaciares',                                         'Montañas y Glaciares del Tronador'),
+
     (r'limay|rios\s+y\s+lagos',                                     'Rios y Lagos del Limay'),
     (r'cascada|alerces|\bmanso\b',                                  'Lagos y Cascadas del Manso'),
     (r'san\s+martin|\bsma\b',                                       'San Martin de los Andes'),
@@ -191,12 +303,15 @@ ACTIVITY_RULES = [
     (r'(naveg|barco|lancha).*\b(ac|almuerzo|pvt|privad[ao])\b|\b(ac|almuerzo|pvt|privad[ao])\b.*(naveg|barco|lancha)',
                                                                     'Navegacion AC'),
     (r'naveg|barco|lancha',                                         'Navegacion Regular'),
+    (r'lagos\s+y\s+monta[nñ]as',                                    'MTB'),
     (r'\bmtb\b|mountain\s*bike|\bbici',                             'MTB'),
+    (r'tronador|glaciares|monta[nñ]as',                             'Montañas y Glaciares del Tronador'),
     (r'\btrek',                                                     'FD Trekking'),
 ]
-ACTIVITY_WORDS = (r'kayak|tronador|glaciares|limay|rios\s+y\s+lagos|valle\s+encantado|\basado\b|naveg|barco|lancha|'
+ACTIVITY_WORDS = (r'kayak|tronador|glaciares|monta[nñ]as|limay|rios\s+y\s+lagos|valle\s+encantado|\basado\b|naveg|barco|lancha|'
                   r'\bmtb\b|mountain\s*bike|\bbici|\btrek|plani|cascada|alerces|\bmanso\b|san\s+martin|\bsma\b|'
-                  r'trucha|\bpollo|hiking|\bbrc\b|\bfrey\b|goye|bella\s+vista|\bvalle\b')
+                  r'trucha|\bpollo|hiking|\bbrc\b|\bfrey\b|goye|bella\s+vista|\bvalle\b|'
+                  r'centinela|arrayanes|tristeza|cerro\s+llao|lagos\s+y\s+monta[nñ]as')
 
 # "Valle Encantado" solo, sin decir qué comida: hay que preguntar
 VALLE_AMBIGUO = r'valle\s+encantado|\bvalle\b'
@@ -216,17 +331,21 @@ def mentions_activity(text: str) -> bool:
 
 def detect_site(text: str):
     t = _sin_tildes(text)
-    for key, val in SITES.items():
+    # de la clave más larga a la más corta: "cerro llao" gana sobre "llao llao"
+    for key in sorted(SITES, key=len, reverse=True):
         if key in t:
-            return val
+            return SITES[key]
     return None
 
 
 def detect_pax(text: str):
     t = _sin_tildes(text)
-    for pat in (r'(\d+)\s*(?:pax|personas?|pasajeros?|pasaj)\b',
+    t = re.sub(r'\+?\s*\d+\s*perso(?:nal)?\b', ' ', t)     # "+2 perso" no es cantidad de pax
+    for pat in (r'(\d+)\s*(?:pax|personas?|pasajeros?|pasaj|pers\b|pp\b|px\b)',
                 r'\bx\s?(\d+)\b',
+                r'\b(\d+)\s*x\b',
                 r'\bson\s+(\d+)\b',
+                r'\bgrupo\s+de\s+(\d+)\b',
                 r'\b(?:para|de)\s+(\d+)(?!\s*[/:hd])\b'):
         m = re.search(pat, t)
         if m:
@@ -235,6 +354,18 @@ def detect_pax(text: str):
     if m:
         return int(NUM_WORDS[m.group(1)])
     return None
+
+
+def detect_personal(text: str):
+    """Cuánta gente de la empresa va: '2 perso', '+1 personal', 'personal 2'."""
+    t = _sin_tildes(text)
+    m = (re.search(r'\+?\s*(\d+)\s*perso(?:nal)?\b', t)
+         or re.search(r'perso(?:nal)?\s*:?\s*(\d+)\b', t)
+         or re.search(r'(?:con|son)\s+(\d+)\s+de\s+la\s+empresa', t))
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n if 0 <= n <= 9 else None
 
 
 def _infer_year(day: int, month: int, today: date):
@@ -326,6 +457,143 @@ def detect_extras(text: str) -> list:
     return [k for k, pat in EXTRA_PATTERNS.items() if re.search(pat, t)]
 
 
+# ── Captura de nombres (guía, pasajero, agencia, conductor, hotel) ────────────
+# Palabras que nunca forman parte de un nombre: marcan dónde termina.
+STOP_NOMBRE = {
+    'hotel', 'pax', 'personas', 'persona', 'pasajeros', 'pasajero', 'hay', 'con', 'para',
+    'el', 'la', 'los', 'las', 'de', 'del', 'en', 'al', 'a', 'y', 'o', 'x', 'hs', 'horas',
+    'reserva', 'guia', 'agencia', 'operador', 'conductor', 'chofer', 'movil', 'vehiculo',
+    'transporte', 'camioneta', 'combi', 'alojados', 'alojado', 'alojan', 'hospedados',
+    'auto', 'talle', 'talles', 'botitas', 'botita', 'neoprene', 'neopren', 'nombre',
+    'restricciones', 'restriccion', 'sin', 'mas', 'son', 'uno', 'una', 'un', 'dos', 'tres',
+    'celiaco', 'celiacos', 'vegano', 'veganos', 'vegetariano', 'vegetarianos', 'veggie',
+    'sopa', 'infusiones', 'infusion', 'cafe', 'te', 'termo', 'frio', 'hace', 'que', 'ahora',
+    'nuevo', 'nueva', 'otra', 'otro', 'vuelta', 'planilla', 'excel', 'salida', 'excursion',
+    'manana', 'hoy', 'pasado', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes',
+    'sabado', 'domingo', 'kayak', 'trekking', 'trek', 'mtb', 'navegacion', 'tronador',
+}
+
+_PALABRA = r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ'’.-]*"
+
+
+def capture_name(text: str, prefix: str, max_words: int = 2):
+    """
+    Busca `prefix` (regex) y devuelve hasta `max_words` palabras siguientes,
+    cortando en la primera palabra de STOP_NOMBRE o en algo que no sea una palabra.
+    """
+    m = re.search(prefix, text, re.IGNORECASE)
+    if not m:
+        return None
+    resto = text[m.end():]
+    resto = re.sub(r'^\s*(?::|es|son|va\s+a\s+ser|ser[aá])?\s*', '', resto, flags=re.IGNORECASE)
+    resto = resto.split('\n')[0]          # un dato por línea: no cruza al renglón siguiente
+    palabras = []
+    for tok in re.finditer(rf'\S+', resto):
+        crudo = tok.group(0)
+        w = crudo.strip('.,;:()[]')
+        if not re.fullmatch(_PALABRA, w):
+            break
+        if _sin_tildes(w) in STOP_NOMBRE:
+            break
+        palabras.append(w)
+        if len(palabras) >= max_words or crudo.rstrip().endswith(('.', ',', ';')):
+            break                        # "peninsula petit." termina ahí
+    if not palabras:
+        return None
+    # 'lark' → 'Lark', pero 'GFT' queda como está
+    return ' '.join(w.capitalize() if w.islower() else w for w in palabras)
+
+
+# ── Agencia / cliente corporativo ─────────────────────────────────────────────
+# Agencias conocidas: se reconocen aunque no digan "agencia".
+AGENCIES = [
+    'say hueque', 'say vaya', 'beyond ba', 'gft', 'south american inside',
+    'chimu', 'tangol', 'signature', 'kallpa', 'contours', 'lihue', 'nuevo mundo',
+    'journey latin america', 'abercrombie', 'audley', 'swoop', 'pura aventura',
+]
+_NOMBRE = r'[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+){0,2}'
+_STOP_NOM = (r'(?:hotel|pax|hay|con|para|el|la|los|las|de|del|en|al|a|y|x|hs|reserva|guia|gu[ií]a|'
+             r'son|uno|una|un|agencia|cliente|conductor|chofer|movil|m[oó]vil|talle|talles|'
+             r'neoprene|botitas|nombre|restricciones|sin|mas|m[aá]s)\b')
+
+
+# Formas de nombrar el hotel sin decir "hotel"
+HOTEL_PREFIX = (r'\bhotel\b|\baloj\w*\s+en\b|\bhosped\w*\s+en\b|\bse\s+aloja\w*\s+en\b|'
+                r'\bparan?\s+en\b|\best[aá]n?\s+en\s+(?=el\s|la\s|[A-Z])')
+
+
+def detect_agency(text: str):
+    val = capture_name(text, r'\b(?:agencia|operador|agency|agencia\s+es)\b', max_words=3)
+    if val:
+        return val
+    t = _sin_tildes(text)
+    for a in AGENCIES:
+        m = re.search(rf'\b{re.escape(a)}\b', t)
+        if m:
+            original = text[m.start():m.end()]        # respeta cómo lo escribieron
+            return original if any(c.isupper() for c in original) else original.title()
+    return None
+
+
+DRIVER_PREFIX = r'\b(?:conductor|chofer|m[oó]vil|movil|veh[ií]culo|vehiculo|transporte|camioneta|combi)\b'
+
+
+def detect_driver(text: str):
+    """Conductor o móvil: 'conductor Pablo', 'chofer sp 01', 'h1 julio picabea'."""
+    m = re.search(DRIVER_PREFIX + r'\s*(?::|es\s+)?\s*([a-zA-Z]{1,3}\s?\d{1,2})\b',
+                  text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip().upper()
+    val = capture_name(text, DRIVER_PREFIX, max_words=3)
+    if val:
+        # "Julio Picabea H1": el móvil va pegado al nombre
+        cola = re.search(rf'{re.escape(val)}\s+([a-zA-Z]{{1,3}}\s?\d{{1,2}})\b', text, re.IGNORECASE)
+        return f"{val} {cola.group(1).upper()}" if cola else val
+    m = re.search(r'\b(sp\s?\d{1,2}|h\s?\d{1,2})\b', _sin_tildes(text))
+    if m:
+        return m.group(1).strip().upper()
+    val = capture_name(text, r'\bauto\b')
+    return f"Auto {val}" if val else None
+
+
+def detect_wetsuit(text: str):
+    """Talles de botitas de neoprene: 'talles 38, 40, 42' · 'botitas 2x40 1x43'."""
+    t = _sin_tildes(text)
+    m = re.search(r'(?:talles?|botitas?|neoprene|neopren)\s*(?:de\s+)?(?:neoprene\s*)?[:\s]\s*'
+                  r'((?:\d{1,2}\s*x\s*)?\d{2}(?:\s*(?:,|y|/|\s)\s*(?:\d{1,2}\s*x\s*)?\d{2})*)', t)
+    if not m:
+        return None
+    crudo = m.group(1)
+    partes = re.findall(r'(?:(\d{1,2})\s*x\s*)?(\d{2})', crudo)
+    out = []
+    for cant, talle in partes:
+        if not (34 <= int(talle) <= 48):      # un talle real, no una hora ni un año
+            continue
+        out.append(f"{cant}x{talle}" if cant else talle)
+    return ', '.join(out) or None
+
+
+
+CAMPOS_SUELTOS = ('client', 'agency', 'hotel', 'driver', 'guide', 'hora',
+                  'wetsuit', 'personal', 'dietary_restrictions')
+
+
+def campos_sueltos(text: str) -> dict:
+    """
+    Datos que llegan después, sin actividad ni fecha:
+    "Nombre: oram david / Agencia: aliwen incoming / Hotel: peninsula petit".
+    Devuelve solo los campos que el mensaje nombra explícitamente.
+    """
+    r = parse_message(text)
+    out = {c: r[c] for c in CAMPOS_SUELTOS if r.get(c)}
+    # Sin una etiqueta clara no se arriesga: evita tomar cualquier frase como nombre
+    if not re.search(r'\b(?:nombre|cliente|reserva|agencia|hotel|aloja\w*|hosped\w*|conductor|chofer|'
+                     r'veh[ií]culo|vehiculo|transporte|gu[ií]a|talles?|botitas?|perso\w*|'
+                     r'restricciones?|a\s+las?)\b', _sin_tildes(text)):
+        return {}
+    return out
+
+
 def merge_followup(text: str, pending: dict) -> dict | None:
     """
     Con un borrador pendiente, intenta completarlo/corregirlo con reglas.
@@ -338,7 +606,8 @@ def merge_followup(text: str, pending: dict) -> dict | None:
         return None
     merged = dict(pending)
     changed = False
-    for field in ('activity', 'site', 'pax', 'date', 'guide', 'client', 'hora', 'hotel'):
+    for field in ('activity', 'site', 'pax', 'date', 'guide', 'client', 'hora', 'hotel',
+                  'agency', 'driver', 'wetsuit', 'personal'):
         if new.get(field) and new[field] != pending.get(field):
             merged[field] = new[field]; changed = True
     if new.get('activity'):
@@ -390,43 +659,34 @@ def parse_message(text: str) -> dict:
 
     # ── Cantidad de pax ───────────────────────────────────────────────────────
     result['pax'] = detect_pax(text)
+    result['personal'] = detect_personal(text)
 
     # ── Fecha ─────────────────────────────────────────────────────────────────
     result['date'] = detect_date(text)
 
     # ── Cliente / nombre de reserva ───────────────────────────────────────────
-    result['client'] = None
-    client_m = re.search(
-        r'(?:reserva|cliente|contacto)\s+(?:de\s+)?'
-        r'([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
-        text, re.IGNORECASE
-    )
-    if client_m:
-        result['client'] = client_m.group(1).strip().title()
+    result['client'] = capture_name(
+        text, r'\b(?:reserva|a\s+nombre\s+de|nombre|cliente|pasajeros?\s+es)\b', max_words=3)
 
     # ── Guía ─────────────────────────────────────────────────────────────────
     # La segunda palabra NO puede ser una palabra clave (hotel, pax, hay, etc.)
-    result['guide'] = None
-    guide_m = re.search(
-        r'gu[ií]a(?:\s+(?:es|va\s+a\s+ser|ser[aá]|:))?\s+'
-        r'([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+'
-        r'(?:\s+(?!(?:hotel|pax|hay|con|para|el|la|los|las|de|del|en|al|a|y|x|hs|reserva|guia|gu[ií]a|son|uno|una|un)\b)[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
-        text, re.IGNORECASE
-    )
-    if guide_m:
-        result['guide'] = guide_m.group(1).strip().title()
+    result['guide'] = capture_name(text, r'\b(?:gu[ií]a|guiada\s+por|gu[ií]ada\s+por|lo\s+lleva|la\s+lleva|va\s+con)\b')
+
+    # ── Agencia, conductor y talles de neoprene ──────────────────────────────
+    result['agency']  = detect_agency(text)
+    result['driver']  = detect_driver(text)
+    result['wetsuit'] = detect_wetsuit(text)
 
     # ── Hora ─────────────────────────────────────────────────────────────────
     result['hora'] = detect_hora(text)
 
     # ── Hotel ─────────────────────────────────────────────────────────────────
-    result['hotel'] = None
-    hotel_m = re.search(
-        r'hotel\s+(?:es\s+)?([A-Za-záéíóúüñÁÉÍÓÚÜÑ][A-Za-záéíóúüñÁÉÍÓÚÜÑ\s]{2,30}?)(?:\s*$|,|\s+\d|\s+el\s|\s+la\s|\s+para\s|\s+pax|\s+guia)',
-        text, re.IGNORECASE
-    )
-    if hotel_m:
-        result['hotel'] = hotel_m.group(1).strip().title()
+    result['hotel'] = capture_name(text, HOTEL_PREFIX, max_words=3)
+    # "hotel Llao Llao" no convierte a Llao Llao en el sitio de la excursión
+    if result['hotel'] and result['site']:
+        h = _sin_tildes(result['hotel'])
+        if any(w in h for w in _sin_tildes(result['site']).split()):
+            result['site'] = None
 
     # ── Restricciones alimentarias ────────────────────────────────────────────
     restrictions = []
@@ -497,6 +757,31 @@ def parse_set_restrictions(text: str):
     return val.strip(' .') or None
 
 
+def _valor_final(text: str):
+    """El valor nuevo de un cambio suele ir al final, después de 'a' o 'es'."""
+    partes = re.split(r'\s+(?:a|es|por)\s+', text, flags=re.IGNORECASE)
+    if len(partes) < 2:
+        return None
+    return capture_name(' ' + partes[-1], r'^')
+
+
+# Verbos que dejan claro que se habla de una salida YA cargada
+VERBOS_MODIFICACION = (r'\b(?:cambi\w*|modific\w*|cancel\w*|reenv\w*|mand[aá]\w*\s+de\s+nuevo|'
+                       r'agreg\w*|sum[aá]\w*|sac[aá]\w*|quit\w*|elimin\w*|borr\w*|pon[eé]\w*|dej[aá]\w*|'
+                       r'ahora|ya\s+no|pas[aá]l[oa]|corr[eé]l[oa]|actualiz\w*|edit\w*)\b')
+
+
+def parece_salida_nueva(text: str) -> bool:
+    """
+    Un mensaje con actividad + al menos dos datos propios (pax, fecha, guía)
+    es una salida nueva, aunque diga "el nombre es X" o "la agencia es Y".
+    """
+    r = parse_message(text)
+    if not r.get('activity'):
+        return False
+    return sum(1 for c in ('pax', 'date', 'guide') if r.get(c)) >= 2
+
+
 def parse_update(text: str) -> dict | None:
     """
     Detecta si el mensaje es una actualización de excursión existente.
@@ -504,6 +789,11 @@ def parse_update(text: str) -> dict | None:
     O None si no parece una actualización.
     """
     t = text.lower().strip()
+
+    # "El sábado hay un valle encantado con 2 pax, guía Fer. El nombre es X" es
+    # una salida nueva, no una modificación: sin verbo de cambio, no se toca nada.
+    if parece_salida_nueva(text) and not re.search(VERBOS_MODIFICACION, _sin_tildes(t)):
+        return None
 
     VERBS = r'(?:cambia[r]?|modifica[r]?|actualiza[r]?|correg[ií][r]?|ponele?|pone[r]?|mov[eé][r]?|actualiz[ao])'
 
@@ -529,9 +819,21 @@ def parse_update(text: str) -> dict | None:
         action = 'update_pax'
     elif re.search(rf'{VERBS}\s+(?:el\s+)?hotel|agrega[r]?\s+(?:el\s+)?hotel|nuevo\s+hotel', t):
         action = 'update_hotel'
-    elif re.search(r'reenv[ií]a[r]?|manda[r]?\s+(?:de\s+)?nuevo|volver\s+a\s+mandar|pasame\s+(?:de\s+nuevo\s+)?(?:la\s+)?plan[i]?|devolv[eé][r]?\s+(?:la\s+)?plan[i]?', t) and re.search(r'plan[i]?|excel', t):
-        action = 'resend_planilla'
-    elif re.search(rf'reenv[ií]a[r]?|mand[aá][r]?\s+de\s+nuevo|pas[aá]me\s+(?:la\s+)?plan', t):
+    elif re.search(rf'{VERBS}\s+(?:la\s+)?agencia|agrega[r]?\s+(?:la\s+)?agencia|'
+                   rf'(?:la\s+)?agencia\s+(?:es|:)|nueva\s+agencia', t):
+        action = 'update_agency'
+    elif re.search(r'\b(?:conductor|chofer|m[oó]vil)\b', t):
+        action = 'update_driver'
+    elif detect_wetsuit(text) and re.search(r'\b(?:talles?|botitas?|neoprene)\b', t):
+        action = 'update_wetsuit'
+    elif re.search(r'\bperso(?:nal)?\b', _sin_tildes(t)) and detect_personal(text) is not None:
+        action = 'update_personal'
+    elif re.search(rf'{VERBS}\s+(?:el\s+)?(?:nombre|cliente)|(?:nombre|cliente)\s+(?:es|:)|'
+                   rf'cambi[oó]\s+(?:el\s+)?nombre', t):
+        action = 'update_client'
+    elif re.search(r'plan[i]?|excel', t) and re.search(
+            r'reenv[ií]\w*|mand[aá]\w*|pas[aá]\w*|manda\w*|volver\s+a\s+mandar|devolv[eé]\w*|'
+            r'necesito|dame|quiero', t):
         action = 'resend_planilla'
     elif detect_extras(text) and re.search(r'\b(?:saca|quita|elimina|borra|sin)\w*', _sin_tildes(t)) and \
             re.search(r'\b(?:saca|quita|elimina|borra)\w*\s+(?:el|la|los|las)?\s*(?:set|infusion|sopa|te|cafe|termo)|\bsin\s+(?:sopa|infusion|cafe|te)', _sin_tildes(t)):
@@ -583,24 +885,20 @@ def parse_update(text: str) -> dict | None:
         # "agregá el set de infusiones AL VALLE DE CINTIA": la salida viene después de al/del/en
         parts = re.split(r'\s(?:al|a\s+la|del|de\s+la|en\s+el|en\s+la|para\s+el|para\s+la)\s', text, maxsplit=1, flags=re.I)
         id_text = parts[1] if len(parts) > 1 else text
-    guide_m = re.search(
-        r'gu[ií]a\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]+(?:\s+[A-Za-záéíóúüñÁÉÍÓÚÜÑ]+)?)',
-        id_text, re.IGNORECASE
-    )
-    if guide_m:
-        # Filtrar stop words del final
-        words = guide_m.group(1).strip().split()
-        words = [w for i, w in enumerate(words) if i == 0 or w.lower() not in STOP_WORDS]
-        result['identifier'] = ' '.join(words).title()
+    guide_id = capture_name(id_text, r'\bgu[ií]a\b')
+    if guide_id:
+        result['identifier'] = guide_id
         result['identifier_type'] = 'guide'
     else:
         # Busca "de [Nombre]" — solo una palabra para evitar capturar "de Lark el 20/6"
-        client_m = re.search(r'\bde\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]{3,})', id_text, re.IGNORECASE)
-        if client_m:
-            word = client_m.group(1)
-            if word.lower() not in STOP_WORDS:
-                result['identifier'] = word.title()
-                result['identifier_type'] = 'client'
+        # Primera palabra after "de"/"para" que sea un nombre propio y no relleno
+        for m_cli in re.finditer(r'\b(?:de|para)\s+([A-Za-záéíóúüñÁÉÍÓÚÜÑ]{3,})', id_text, re.IGNORECASE):
+            word = m_cli.group(1)
+            if word.lower() in STOP_WORDS or _sin_tildes(word) in STOP_NOMBRE:
+                continue
+            result['identifier'] = word.title()
+            result['identifier_type'] = 'client'
+            break
 
     # Extraer nuevo valor según acción
     if action == 'update_hora':
@@ -638,13 +936,26 @@ def parse_update(text: str) -> dict | None:
         result['new_value'] = detect_pax(text)
 
     elif action == 'update_hotel':
-        # "agrega el hotel Llao Llao" / "el hotel es Panamericano"
-        hotel_m = re.search(r'hotel\s+(?:es\s+)?([A-Za-záéíóúüñÁÉÍÓÚÜÑ][A-Za-záéíóúüñÁÉÍÓÚÜÑ\s]+?)(?:\s*$|\s+en\s|\s+el\s|\s+\d)', text, re.IGNORECASE)
-        if hotel_m:
-            result['new_value'] = hotel_m.group(1).strip().title()
+        # "agrega el hotel Llao Llao al kayak de Lark" / "el hotel es Panamericano"
+        result['new_value'] = capture_name(text, r'\bhotel\b', max_words=3) or _valor_final(text)
 
     elif action in ('add_extra', 'remove_extra'):
         result['new_value'] = detect_extras(text)
+
+    elif action == 'update_agency':
+        result['new_value'] = detect_agency(text)
+
+    elif action == 'update_driver':
+        result['new_value'] = detect_driver(text) or _valor_final(text)
+
+    elif action == 'update_wetsuit':
+        result['new_value'] = detect_wetsuit(text)
+
+    elif action == 'update_personal':
+        result['new_value'] = detect_personal(text)
+
+    elif action == 'update_client':
+        result['new_value'] = capture_name(text, r'\b(?:nombre|cliente)\b', max_words=3) or _valor_final(text)
 
     elif action == 'set_restrictions':
         result['new_value'] = parse_set_restrictions(text)

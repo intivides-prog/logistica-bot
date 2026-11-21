@@ -819,7 +819,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-VERSION = "v12 — 21/11/2026"
+VERSION = "v13 — 21/11/2026"
 NOVEDADES = [
     "Mensajes largos con todos los datos juntos",
     "Varias reservas en un mismo mensaje",
@@ -828,6 +828,7 @@ NOVEDADES = [
     "Editar ítems de la planilla por chat",
     "Reconfirmación de gastronomía con códigos (AC, BLG, EEPP…)",
     "Planillas con nombre tipo «21-11 Valle Encantado Asado x2»",
+    "Códigos de gastronomía unificados (AC, BLG, BLT, EEPP, EPP, snacks)",
 ]
 
 
